@@ -1,8 +1,8 @@
 export default function Home() {
   return (
-    <main style={{ padding: 40, fontFamily: 'Arial' }}>
-      <h1>🚀 MCA Deal Matching App</h1>
- <p>This is the live homepage. Updated now.</p>
+    <main style={{ padding: "2rem", fontFamily: "Arial, sans-serif" }}>
+      <h1>MCA Deal Matching App</h1>
+      <p>Upload applications and bank statements to match with top lenders.</p>
     </main>
   );
 }
