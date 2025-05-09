@@ -52,7 +52,7 @@
     "node-fetch": "latest",
     "pdf-lib": "latest",
     "pdf-parse": "latest",
-    "pdfjs-dist": "^2.16.105",
+    "pdfjs-dist": "latest",
     "react": "^19",
     "react-day-picker": "8.10.1",
     "react-dom": "^19",

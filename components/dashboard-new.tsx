@@ -28,20 +28,14 @@ import { Progress } from "@/components/ui/progress"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useToast } from "@/hooks/use-toast"
 import { useApplication } from "@/context/application-context"
-import { analyzeDocuments, type AnalysisResult } from "@/lib/document-analyzer"
+import type { AnalysisResult } from "@/lib/document-analyzer"
 import { matchLendersToApplication } from "@/lib/lender-matcher"
 import { submitToLender } from "@/lib/email-sender"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { useAuth } from "@/context/auth-context"
-import { extractBankText, analyzeBankTransactions, initPdfWorker } from "@/lib/bank-analyzer"
-
-// Add these imports at the top of your file
-import { uploadFile } from "@/lib/storage-service"
-// Add this import at the top of your file
-import { supabase, checkBucketExists } from "@/lib/supabase-client"
-// Add this import at the top of your file
-import { runSupabaseDiagnostics } from "@/lib/supabase-diagnostics"
+import { initPdfWorker } from "@/lib/bank-analyzer"
+import { Checkbox } from "@/components/ui/checkbox"
 
 // Define the steps in our process
 const STEPS = [
@@ -140,6 +134,23 @@ interface ParsedFields {
   industry?: string
   phoneNumber?: string
   email?: string
+  monthlyRevenue?: number
+}
+
+// Define interface for matched lender
+interface MatchedLender {
+  id: string
+  name: string
+  description: string
+  matchScore: number
+  minFunding: number
+  maxFunding: number
+  factorRate: number
+  termLength: number
+  requirements: string[]
+  contactEmail?: string
+  contactPhone?: string
+  logoUrl?: string
 }
 
 // Helper function to format currency
@@ -169,8 +180,6 @@ const getRiskLevel = (score: number) => {
   }
 }
 
-// Add this function to your component
-
 export function DashboardNew() {
   // State for the current step
   const [currentStep, setCurrentStep] = useState<string>(STEPS[0].id)
@@ -189,22 +198,30 @@ export function DashboardNew() {
     fundingAmount: "",
     state: "",
     industry: "",
+    email: "",
+    phoneNumber: "",
+    monthlyRevenue: "",
+    avgDailyBalance: "",
+    negativeDays: "",
+    hasExistingLoans: false,
+    dataVerified: false,
   })
 
-  // Add this to your existing state variables in the DashboardNew component
+  // State for upload and processing
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [extractedText, setExtractedText] = useState<string | null>(null)
   const [parsedFields, setParsedFields] = useState<ParsedFields | null>(null)
-
-  // State for processing
   const [isProcessing, setIsProcessing] = useState(false)
   const [isExtracting, setIsExtracting] = useState(false)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [debugInfo, setDebugInfo] = useState<string | null>(null)
   const [extractionSuccess, setExtractionSuccess] = useState(false)
-  const [pdfWorkerInitialized, setPdfWorkerInitialized] = useState(false)
+
+  // State for parsed data and matched lenders from backend
+  const [parsedData, setParsedData] = useState<ParsedFields | null>(null)
+  const [matchedLenders, setMatchedLenders] = useState<MatchedLender[]>([])
 
   // State for bank analysis results
   const [bankAnalysisResults, setBankAnalysisResults] = useState<{
@@ -223,10 +240,10 @@ export function DashboardNew() {
   const {
     setApplicationData,
     setIsAnalyzing,
-    setMatchingLenders,
+    setMatchingLenders: setContextMatchingLenders,
     setUploadedFiles,
     applicationData,
-    matchingLenders,
+    matchingLenders: contextMatchingLenders,
     isAnalyzing,
     uploadedFiles,
   } = useApplication()
@@ -234,251 +251,80 @@ export function DashboardNew() {
 
   // Initialize PDF.js worker when component mounts
   useEffect(() => {
-    // Initialize the PDF.js worker
     try {
       initPdfWorker()
-      setPdfWorkerInitialized(true)
       console.log("PDF.js worker initialized successfully")
     } catch (error) {
       console.error("Error initializing PDF.js worker:", error)
-      setPdfWorkerInitialized(false)
       setDebugInfo("PDF processing may be limited. You can still upload files, but automatic analysis might not work.")
     }
   }, [])
 
-  // Add this to your existing useEffect or create a new one
+  // Effect to update form data when parsedData changes
   useEffect(() => {
-    // Check if the bucket exists when component mounts
-    const checkBucket = async () => {
-      try {
-        const bucketExists = await checkBucketExists("applications")
-        if (!bucketExists) {
-          setDebugInfo("Warning: The 'applications' storage bucket doesn't exist. Please contact your administrator.")
-          toast({
-            title: "Storage Not Configured",
-            description: "The application storage is not properly configured. File uploads may fail.",
-            variant: "warning",
-          })
-        } else {
-          console.log("Applications bucket is available for use")
-        }
-      } catch (error) {
-        console.error("Error checking storage bucket:", error)
-        setDebugInfo("Error checking storage. File uploads may not work.")
+    if (parsedData) {
+      setFormData((prev) => ({
+        ...prev,
+        businessName: parsedData.businessName || prev.businessName,
+        creditScore: parsedData.creditScore ? String(parsedData.creditScore) : prev.creditScore,
+        timeInBusiness: parsedData.timeInBusiness ? String(parsedData.timeInBusiness) : prev.timeInBusiness,
+        fundingAmount: parsedData.fundingRequested ? String(parsedData.fundingRequested) : prev.fundingAmount,
+        state: parsedData.state || prev.state,
+        industry: parsedData.industry || prev.industry,
+        email: parsedData.email || prev.email,
+        phoneNumber: parsedData.phoneNumber || prev.phoneNumber,
+        monthlyRevenue: parsedData.monthlyRevenue ? String(parsedData.monthlyRevenue) : prev.monthlyRevenue,
+      }))
+
+      setExtractionSuccess(true)
+
+      // Also update the bank analysis if monthly revenue is available
+      if (parsedData.monthlyRevenue && !bankAnalysisResults) {
+        setBankAnalysisResults({
+          avgMonthlyRevenue: parsedData.monthlyRevenue,
+          nsfDays: 0,
+          existingMcaCount: 0,
+          recentFundingDetected: false,
+          mcaLenders: [],
+          depositConsistency: 85,
+        })
       }
     }
+  }, [parsedData, bankAnalysisResults])
 
-    checkBucket()
-  }, [toast])
+  // Add a new useEffect to update formData when bankAnalysisResults changes
+  useEffect(() => {
+    if (bankAnalysisResults) {
+      setFormData((prev) => ({
+        ...prev,
+        monthlyRevenue: String(bankAnalysisResults.avgMonthlyRevenue) || prev.monthlyRevenue,
+        avgDailyBalance: String(bankAnalysisResults.avgMonthlyRevenue * 0.3) || prev.avgDailyBalance,
+        negativeDays: String(bankAnalysisResults.nsfDays) || "0",
+        hasExistingLoans: bankAnalysisResults.existingMcaCount > 0 || bankAnalysisResults.recentFundingDetected,
+      }))
+    }
+  }, [bankAnalysisResults])
 
-  // Handle file uploads
+  // Effect to update context when matchedLenders changes
+  useEffect(() => {
+    if (matchedLenders.length > 0) {
+      setContextMatchingLenders(matchedLenders)
+    }
+  }, [matchedLenders, setContextMatchingLenders])
+
+  // Handle file uploads for bank statements
   const handleBankStatementUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const filesArray = Array.from(e.target.files)
       setBankStatements((prev) => [...prev, ...filesArray])
 
-      // Process the first bank statement file with the bank analyzer
-      try {
-        setIsProcessing(true)
-        setDebugInfo("Processing bank statement...")
-        const file = filesArray[0]
-
-        // Only attempt PDF analysis for PDF files and if worker is initialized
-        if (file.type === "application/pdf" && pdfWorkerInitialized) {
-          setDebugInfo("Extracting text from PDF bank statement...")
-
-          try {
-            // Extract text from the bank statement
-            const extractedText = await extractBankText(file)
-            setDebugInfo("Text extracted successfully. Analyzing transactions...")
-
-            // Analyze the bank transactions
-            const analysisResult = analyzeBankTransactions(extractedText)
-
-            if (analysisResult.analysisSuccess) {
-              setBankAnalysisResults({
-                avgMonthlyRevenue: analysisResult.avgMonthlyRevenue,
-                nsfDays: analysisResult.nsfDays,
-                existingMcaCount: analysisResult.existingMcaCount,
-                recentFundingDetected: analysisResult.recentFundingDetected,
-                mcaLenders: analysisResult.mcaLenders,
-                depositConsistency: analysisResult.depositConsistency * 100, // Convert to percentage
-              })
-
-              setDebugInfo("Bank statement analysis complete")
-
-              toast({
-                title: "Bank Statement Analyzed",
-                description: "We've analyzed your bank statement and extracted key financial data.",
-              })
-            } else {
-              setDebugInfo(`Analysis limited: ${analysisResult.errorMessage}`)
-
-              toast({
-                title: "Analysis Limited",
-                description: analysisResult.errorMessage || "Limited data could be extracted from the bank statement",
-                variant: "warning",
-              })
-            }
-          } catch (pdfError) {
-            console.error("PDF processing error:", pdfError)
-            setDebugInfo(`PDF processing error: ${pdfError.message}`)
-
-            // Show a warning but don't block the upload
-            toast({
-              title: "PDF Processing Limited",
-              description: "We had trouble processing the PDF. You can still continue with the upload.",
-              variant: "warning",
-            })
-          }
-        } else {
-          if (file.type !== "application/pdf") {
-            setDebugInfo("Non-PDF file uploaded. Skipping PDF analysis.")
-          } else {
-            setDebugInfo("PDF worker not initialized. Skipping PDF analysis.")
-          }
-        }
-      } catch (error) {
-        console.error("Error analyzing bank statement:", error)
-        setError("Failed to analyze bank statement.")
-        setDebugInfo(`Error: ${error.message}`)
-      } finally {
-        setIsProcessing(false)
-      }
+      // Just set a debug message without starting analysis
+      setDebugInfo("Bank statements added. Analysis will start when you continue to the next step.")
     }
   }
 
-  // Add this function to handle PDF upload to Supabase and extraction
-  const handlePdfUploadAndExtract = async (file: File) => {
-    if (!file || file.type !== "application/pdf") {
-      toast({
-        title: "Invalid File",
-        description: "Please select a valid PDF file.",
-        variant: "destructive",
-      })
-      return
-    }
-
-    setIsUploading(true)
-    setUploadProgress(0)
-    setError(null)
-    setDebugInfo("Starting PDF upload and extraction process...")
-
-    try {
-      // Step 1: Upload to Storage (with fallback)
-      setDebugInfo("Uploading PDF to storage...")
-      setUploadProgress(10)
-
-      // Upload the file using our storage service
-      const uploadResult = await uploadFile(file)
-
-      if (!uploadResult.success) {
-        throw new Error(uploadResult.error || "Upload failed")
-      }
-
-      const fileUrl = uploadResult.url
-      const storageType = uploadResult.storageType
-      const bucketUsed = uploadResult.bucketUsed
-
-      console.log(
-        `File uploaded successfully using ${storageType} storage${bucketUsed ? ` (bucket: ${bucketUsed})` : ""}:`,
-        fileUrl,
-      )
-      setDebugInfo(
-        `PDF uploaded successfully using ${storageType} storage${bucketUsed ? ` (bucket: ${bucketUsed})` : ""}. Getting ready for extraction...`,
-      )
-      setUploadProgress(50) // Upload complete, now at 50%
-
-      // Step 3: Send to extraction API
-      setDebugInfo("Sending to extraction API...")
-      setUploadProgress(60)
-
-      const extractionResponse = await fetch("/api/extract-pdf", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          fileUrl,
-          storageType,
-          fileName: file.name,
-          bucketUsed,
-        }),
-      })
-
-      if (!extractionResponse.ok) {
-        const errorText = await extractionResponse.text()
-        throw new Error(`Extraction API error: ${extractionResponse.status} - ${errorText}`)
-      }
-
-      const extractionResult = await extractionResponse.json()
-      console.log("Extraction result:", extractionResult)
-      setDebugInfo("PDF extraction complete!")
-      setUploadProgress(100)
-
-      // Step 4: Process the extracted data
-      if (extractionResult.extractedText) {
-        setExtractedText(extractionResult.extractedText)
-      }
-
-      if (extractionResult.parsedFields) {
-        setParsedFields(extractionResult.parsedFields)
-
-        // Update form data with extracted fields
-        setFormData((prev) => ({
-          ...prev,
-          businessName: extractionResult.parsedFields.businessName || prev.businessName,
-          creditScore: extractionResult.parsedFields.creditScore
-            ? String(extractionResult.parsedFields.creditScore)
-            : prev.creditScore,
-          timeInBusiness: extractionResult.parsedFields.timeInBusiness
-            ? String(extractionResult.parsedFields.timeInBusiness)
-            : prev.timeInBusiness,
-          fundingAmount: extractionResult.parsedFields.fundingRequested
-            ? String(extractionResult.parsedFields.fundingRequested)
-            : prev.fundingAmount,
-          state: extractionResult.parsedFields.state || prev.state,
-          industry: extractionResult.parsedFields.industry || prev.industry,
-        }))
-
-        setExtractionSuccess(true)
-        toast({
-          title: "PDF Processed Successfully",
-          description: "Information has been extracted and form fields have been populated.",
-        })
-      } else {
-        toast({
-          title: "Extraction Limited",
-          description:
-            "We extracted the text but couldn't identify all fields. Please fill in the missing information manually.",
-          variant: "warning",
-        })
-      }
-
-      // Set the application file
-      setApplication(file)
-
-      // Return the file URL for any further processing
-      return fileUrl
-    } catch (error) {
-      console.error("PDF upload and extraction error:", error)
-      setError(error instanceof Error ? error.message : "An unknown error occurred")
-      setDebugInfo(`Error: ${error instanceof Error ? error.message : "Unknown error"}`)
-
-      toast({
-        title: "Processing Failed",
-        description: error instanceof Error ? error.message : "Failed to process the PDF file.",
-        variant: "destructive",
-      })
-
-      return null
-    } finally {
-      setIsUploading(false)
-    }
-  }
-
-  // Update the handleApplicationUpload function to use our new upload and extract function
-  const handleApplicationUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Handle application upload without immediate parsing
+  const handleApplicationUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0]
 
@@ -501,8 +347,14 @@ export function DashboardNew() {
         })
       }
 
-      // Process the file
-      handlePdfUploadAndExtract(file)
+      // Just store the file without processing
+      setApplication(file)
+      setDebugInfo("Application added. Analysis will start when you continue to the next step.")
+
+      toast({
+        title: "Application Uploaded",
+        description: "Your application has been uploaded. Click 'Continue to Information' to proceed.",
+      })
     }
   }
 
@@ -519,6 +371,7 @@ export function DashboardNew() {
     } else if (type === "application") {
       setApplication(null)
       setExtractionSuccess(false)
+      setParsedData(null)
     }
   }
 
@@ -530,34 +383,120 @@ export function DashboardNew() {
     formData.timeInBusiness &&
     formData.fundingAmount &&
     formData.state &&
-    formData.industry
+    formData.industry &&
+    formData.monthlyRevenue &&
+    formData.dataVerified
 
-  // Update the goToNextStep function to handle extraction errors better
-  // Replace the existing function with this improved version:
+  // Analyze bank statements
+  const analyzeBankStatements = async (file: File) => {
+    if (!file) return
 
-  const goToNextStep = async () => {
-    const currentIndex = STEPS.findIndex((step) => step.id === currentStep)
-
-    // If moving from upload to info step, process the application
-    if (currentStep === "upload" && application && !extractionSuccess) {
-      const shouldContinueDespiteError = await processApplicationPDF()
-
-      // If there was an error but we should continue anyway
-      if (shouldContinueDespiteError) {
-        setCurrentStep(STEPS[currentIndex + 1].id)
-        return
+    try {
+      // Check file size
+      const fileSizeMB = file.size / (1024 * 1024)
+      if (fileSizeMB > 20) {
+        toast({
+          title: "File Too Large",
+          description: `Your PDF is ${fileSizeMB.toFixed(2)} MB. Maximum allowed size is 20MB.`,
+          variant: "destructive",
+        })
+        throw new Error("File too large")
       }
-    }
 
-    if (currentIndex < STEPS.length - 1) {
-      setCurrentStep(STEPS[currentIndex + 1].id)
+      setDebugInfo("Analyzing bank statement...")
+      console.log("Starting bank statement analysis for file:", file.name)
+
+      if (file.type === "application/pdf") {
+        const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/upload-and-parse`
+        setDebugInfo(`Connecting to API: ${apiUrl}`)
+        console.log("Attempting to connect to:", apiUrl)
+
+        // Create FormData to send the file
+        const formData = new FormData()
+        formData.append("bank_statement", file)
+        formData.append("file_type", "bank_statement")
+
+        // Add timeout to the fetch request
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+
+        try {
+          // Send to the backend with timeout signal
+          const response = await fetch(apiUrl, {
+            method: "POST",
+            body: formData,
+            signal: controller.signal,
+            // Add explicit CORS mode
+            mode: "cors",
+            credentials: "same-origin",
+          })
+
+          clearTimeout(timeoutId)
+
+          if (!response.ok) {
+            const errorText = await response.text().catch(() => "No error details available")
+            console.error("API error response:", errorText)
+            throw new Error(`API returned status: ${response.status}. Details: ${errorText}`)
+          }
+
+          const result = await response.json()
+          console.log("Bank statement analysis result:", result)
+
+          if (result && result.bank_analysis) {
+            // If the backend returns analysis results, use them
+            const analysisData = result.bank_analysis
+
+            setBankAnalysisResults({
+              avgMonthlyRevenue: analysisData.avg_monthly_revenue || 0,
+              nsfDays: analysisData.nsf_days || 0,
+              existingMcaCount: analysisData.existing_mca_count || 0,
+              recentFundingDetected: analysisData.recent_funding_detected || false,
+              mcaLenders: analysisData.mca_lenders || [],
+              depositConsistency: analysisData.deposit_consistency || 0,
+            })
+
+            setDebugInfo("Bank statement analysis complete")
+
+            toast({
+              title: "Bank Statement Analyzed",
+              description: "We've analyzed your bank statement and extracted key financial data.",
+            })
+          } else {
+            throw new Error("Invalid response format from API")
+          }
+        } catch (fetchError) {
+          clearTimeout(timeoutId)
+          if (fetchError.name === "AbortError") {
+            console.error("API request timed out")
+            throw new Error("API request timed out after 30 seconds")
+          } else {
+            console.error("Fetch error:", fetchError)
+            throw fetchError
+          }
+        }
+      } else {
+        throw new Error("Invalid file type. Please upload a PDF file for bank statements.")
+      }
+    } catch (error) {
+      console.error("Error analyzing bank statement:", error)
+      setDebugInfo(`Error processing bank statement: ${error.message}. Continuing with default values.`)
+
+      // Set default values for bank analysis
+      setBankAnalysisResults({
+        avgMonthlyRevenue: 30000, // Default monthly revenue
+        nsfDays: 0,
+        existingMcaCount: 0,
+        recentFundingDetected: false,
+        mcaLenders: [],
+        depositConsistency: 85,
+      })
+
+      // Rethrow the error so the caller knows there was an issue
+      throw error
     }
   }
 
-  // Update the processApplicationPDF function to handle timeouts better
-  // Replace the existing function with this improved version:
-
-  // New function to process application PDF
+  // Process application PDF
   const processApplicationPDF = async () => {
     if (!application) return false
 
@@ -565,49 +504,144 @@ export function DashboardNew() {
       setIsExtracting(true)
       setDebugInfo("Extracting information from application...")
 
-      // Extract PDF on the server
-      const result = await extractPdfOnServer(application)
-
-      if (result.success) {
-        // Update form data with extracted info, but only if values exist
-        setFormData((prev) => ({
-          ...prev,
-          businessName: result.businessName || prev.businessName,
-          creditScore: result.creditScore ? String(result.creditScore) : prev.creditScore,
-          timeInBusiness: result.timeInBusiness ? String(result.timeInBusiness) : prev.timeInBusiness,
-          fundingAmount: result.fundingRequested ? String(result.fundingRequested) : prev.fundingAmount,
-          state: result.state || prev.state,
-          industry: result.industry || prev.industry,
-        }))
-
-        if (result.extractedClientSide) {
-          toast({
-            title: "Manual Entry Required",
-            description: "Server extraction failed. Please fill in the fields manually.",
-            variant: "warning",
-          })
-        } else {
-          setExtractionSuccess(true)
-          toast({
-            title: "Information Extracted",
-            description:
-              "We've pre-filled some fields based on your application document. Please verify all fields and complete any missing information.",
-          })
-        }
-      } else {
-        // Handle the case where extraction returned no usable data
-        setDebugInfo("Could not extract information from application. Please enter information manually.")
-        toast({
-          title: "Manual Entry Required",
-          description: "We couldn't extract information from your document. Please fill in the fields manually.",
-          variant: "warning",
-        })
+      // If we already have extraction success, no need to process again
+      if (extractionSuccess) {
+        setDebugInfo("Using previously extracted information")
+        return false
       }
+
+      // Try to use the backend API first
+      try {
+        // Create form data for the file upload
+        const formData = new FormData()
+        formData.append("application", application) // Changed field name to "application"
+        formData.append("file_type", "application")
+
+        const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/upload-and-parse`
+        setDebugInfo(`Connecting to API: ${apiUrl}`)
+        console.log("Attempting to connect to API for application processing:", apiUrl)
+
+        // Send the file to the backend with a timeout
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+
+        try {
+          const response = await fetch(apiUrl, {
+            method: "POST",
+            body: formData,
+            signal: controller.signal,
+            mode: "cors",
+            credentials: "same-origin",
+          })
+
+          clearTimeout(timeoutId)
+
+          if (response.ok) {
+            const result = await response.json()
+
+            if (result && result.parsed_data) {
+              const extractedData = result.parsed_data
+
+              // Transform the data to match our frontend format
+              const transformedData: ParsedFields = {
+                businessName: extractedData.business_name || "",
+                ownerName: extractedData.owner_name || "",
+                creditScore: extractedData.credit_score || null,
+                timeInBusiness: extractedData.time_in_business || null,
+                fundingRequested: extractedData.funding_requested || null,
+                state: extractedData.state || "",
+                industry: extractedData.industry || "",
+                phoneNumber: extractedData.phone_number || "",
+                email: extractedData.email || "",
+                monthlyRevenue: extractedData.monthly_revenue || null,
+              }
+
+              // Set the parsed data
+              setParsedData(transformedData)
+
+              // Process matched lenders if available
+              if (result.matched_lenders && Array.isArray(result.matched_lenders)) {
+                const lenders: MatchedLender[] = result.matched_lenders.map((lender: any) => ({
+                  id: lender.id || `lender-${Math.random().toString(36).substr(2, 9)}`,
+                  name: lender.name || "Unknown Lender",
+                  description: lender.description || "No description available",
+                  matchScore: lender.match_score || Math.floor(Math.random() * 30) + 70,
+                  minFunding: lender.min_funding || 10000,
+                  maxFunding: lender.max_funding || 500000,
+                  factorRate: lender.factor_rate || 1.2,
+                  termLength: lender.term_length || 12,
+                  requirements: lender.requirements || [],
+                  contactEmail: lender.contact_email,
+                  contactPhone: lender.contact_phone,
+                  logoUrl: lender.logo_url,
+                }))
+
+                setMatchedLenders(lenders)
+              }
+
+              setExtractionSuccess(true)
+              toast({
+                title: "Information Extracted",
+                description:
+                  "We've pre-filled some fields based on your application document. Please verify all fields and complete any missing information before proceeding.",
+              })
+
+              return false // No error occurred
+            } else {
+              throw new Error("Invalid response format from API")
+            }
+          } else {
+            const errorText = await response.text().catch(() => "No error details available")
+            console.error("API error response for application:", errorText)
+            throw new Error(`API returned status: ${response.status} ${response.statusText}. Details: ${errorText}`)
+          }
+        } catch (abortError) {
+          clearTimeout(timeoutId)
+          if (abortError.name === "AbortError") {
+            console.error("API request timed out for application processing")
+            throw new Error("API request timed out after 30 seconds")
+          } else {
+            console.error("Fetch error for application processing:", abortError)
+            throw abortError
+          }
+        }
+      } catch (apiError) {
+        console.error("Error using backend API for application:", apiError)
+        setDebugInfo(`Backend API failed: ${apiError.message}. Proceeding with manual entry...`)
+
+        // Try to extract basic info from the filename as a last resort
+        const filename = application.name
+        if (filename) {
+          // Try to extract business name from filename (very basic fallback)
+          const possibleBusinessName = filename
+            .replace(/\.pdf$/i, "")
+            .replace(/_/g, " ")
+            .replace(/-/g, " ")
+            .trim()
+
+          if (possibleBusinessName) {
+            setFormData((prev) => ({
+              ...prev,
+              businessName: prev.businessName || possibleBusinessName,
+            }))
+
+            setDebugInfo("Extracted basic information from filename as fallback")
+          }
+        }
+
+        throw apiError
+      }
+
+      // Handle the case where extraction returned no usable data
+      setDebugInfo("Could not extract information from application. Please enter information manually.")
+      toast({
+        title: "Manual Entry Required",
+        description: "We couldn't extract information from your document. Please fill in the fields manually.",
+        variant: "warning",
+      })
     } catch (error) {
       console.error("Error extracting information:", error)
-      setDebugInfo("Extraction failed. Please enter information manually.")
-
-      const errorMessage = error instanceof Error ? error.message : "Unknown error"
+      setDebugInfo(`Extraction failed: ${error.message}. Please enter information manually.`)
 
       toast({
         title: "Extraction Failed",
@@ -624,154 +658,81 @@ export function DashboardNew() {
     return false // No error occurred
   }
 
-  // Add this new function after the processApplicationPDF function:
+  // Go to next step
+  const goToNextStep = async () => {
+    const currentIndex = STEPS.findIndex((step) => step.id === currentStep)
 
-  const extractPdfOnServer = async (file: File) => {
-    setIsExtracting(true)
-    setDebugInfo("Uploading PDF to server for extraction...")
+    // If moving from upload to info step, process both bank statements and application
+    if (currentStep === "upload" && bankStatements.length > 0 && application) {
+      setIsProcessing(true)
+      setDebugInfo("Starting document analysis...")
 
-    try {
-      // Create form data for the file upload
-      const formData = new FormData()
-      formData.append("file", file)
-
-      // First, check if the API endpoint exists by making a simple HEAD request
       try {
-        const checkEndpoint = await fetch("/api/extract-pdf", { method: "HEAD" })
-        if (!checkEndpoint.ok) {
-          console.warn("API endpoint may not be available:", checkEndpoint.status, checkEndpoint.statusText)
-          setDebugInfo(
-            `API endpoint check failed: ${checkEndpoint.status} ${checkEndpoint.statusText}. Falling back to client-side extraction.`,
-          )
-          // Continue with fallback approach
+        // First, try to analyze bank statements with the API
+        try {
+          console.log("Attempting to analyze bank statements...")
+          await analyzeBankStatements(bankStatements[0])
+          console.log("Bank statement analysis completed successfully")
+        } catch (bankError) {
+          console.error("Bank statement API analysis failed:", bankError)
+          setDebugInfo("Bank statement API analysis failed. Using default values.")
+
+          // Set default values for bank analysis
+          setBankAnalysisResults({
+            avgMonthlyRevenue: 30000,
+            nsfDays: 0,
+            existingMcaCount: 0,
+            recentFundingDetected: false,
+            mcaLenders: [],
+            depositConsistency: 85,
+          })
+
+          toast({
+            title: "Bank Statement Analysis Failed",
+            description: "We couldn't analyze your bank statement. Using default values instead.",
+            variant: "warning",
+          })
         }
-      } catch (endpointError) {
-        console.warn("Could not check API endpoint:", endpointError)
-        // Continue with fallback approach
+
+        // Then, try to process application
+        try {
+          console.log("Attempting to process application PDF...")
+          await processApplicationPDF()
+          console.log("Application PDF processing completed successfully")
+        } catch (appError) {
+          console.error("Application processing failed:", appError)
+          setDebugInfo("Application processing failed. Continuing with manual entry.")
+
+          toast({
+            title: "Application Processing Failed",
+            description: "We couldn't extract information from your application. Please fill in the fields manually.",
+            variant: "warning",
+          })
+        }
+
+        setIsProcessing(false)
+        // Now proceed to the next step regardless of errors
+        setCurrentStep(STEPS[currentIndex + 1].id)
+        return
+      } catch (error) {
+        console.error("Error analyzing documents:", error)
+        setDebugInfo(`Error during analysis: ${error.message}. You can still proceed with manual entry.`)
+        setIsProcessing(false)
+
+        toast({
+          title: "Document Analysis Error",
+          description: "There was an error analyzing your documents. You can still proceed with manual entry.",
+          variant: "warning",
+        })
+
+        // Continue to the next step despite errors
+        setCurrentStep(STEPS[currentIndex + 1].id)
+        return
       }
-
-      // Set up progress tracking
-      const xhr = new XMLHttpRequest()
-
-      // Create a promise to handle the XHR request
-      const uploadPromise = new Promise<any>((resolve, reject) => {
-        xhr.open("POST", "/api/extract-pdf", true)
-
-        // Track upload progress
-        xhr.upload.onprogress = (event) => {
-          if (event.lengthComputable) {
-            const percentComplete = Math.round((event.loaded / event.total) * 100)
-            setDebugInfo(`Uploading PDF: ${percentComplete}%`)
-          }
-        }
-
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            try {
-              // Log the raw response for debugging
-              console.log("Raw server response:", xhr.responseText)
-
-              // Check if response is empty
-              if (!xhr.responseText.trim()) {
-                reject(new Error("Server returned empty response"))
-                return
-              }
-
-              // Attempt to parse the response as JSON
-              try {
-                const response = JSON.parse(xhr.responseText)
-                resolve(response)
-              } catch (parseError) {
-                console.error("Error parsing server response:", parseError, "Raw response:", xhr.responseText)
-                // Check if the response is HTML by looking for the DOCTYPE declaration
-                if (xhr.responseText.includes("<!DOCTYPE html>")) {
-                  // Handle HTML response (e.g., server error page)
-                  reject(new Error("Received HTML response from server. API endpoint may be unavailable."))
-                } else {
-                  // Handle other parsing errors
-                  reject(new Error("Invalid response from server"))
-                }
-              }
-            } catch (e) {
-              reject(new Error("Invalid response from server"))
-            }
-          } else {
-            reject(new Error(`Server returned ${xhr.status}: ${xhr.statusText}`))
-          }
-        }
-
-        xhr.onerror = () => {
-          console.error("Network error during upload")
-          reject(new Error("Network error during upload"))
-        }
-
-        xhr.ontimeout = () => {
-          console.error("Upload timed out")
-          reject(new Error("Upload timed out"))
-        }
-
-        // Send the form data
-        xhr.send(formData)
-      })
-
-      // Add a timeout to the promise
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error("Request timed out after 30 seconds")), 30000)
-      })
-
-      // Wait for the upload and processing to complete or timeout
-      setDebugInfo("Processing PDF on server...")
-      const result = await Promise.race([uploadPromise, timeoutPromise]).catch((error) => {
-        console.error("Error in PDF extraction:", error)
-        // Return a fallback result instead of throwing
-        return {
-          success: false,
-          error: error.message,
-          fallback: true,
-        }
-      })
-
-      // Check if we got a fallback result
-      if (result.fallback) {
-        setDebugInfo("Server extraction failed. Using fallback approach.")
-        // Implement a basic client-side extraction if needed
-        // For now, just return a minimal successful result
-        return {
-          success: true,
-          businessName: "",
-          state: "",
-          industry: "",
-          extractedClientSide: true,
-        }
-      }
-
-      setDebugInfo("PDF processing complete")
-      return result
-    } catch (error) {
-      console.error("Error extracting PDF on server:", error)
-      setDebugInfo(`Error: ${error.message}. Using fallback approach.`)
-
-      // Return a fallback result instead of throwing
-      return {
-        success: true,
-        businessName: "",
-        state: "",
-        industry: "",
-        extractedClientSide: true,
-        error: error.message,
-      }
-    } finally {
-      setIsExtracting(false)
     }
-  }
 
-  const getPublicUrl = (bucketName: string, filePath: string) => {
-    try {
-      const { data } = supabase.storage.from(bucketName).getPublicUrl(filePath)
-      return data.publicUrl
-    } catch (error) {
-      console.error("Error getting public URL:", error)
-      return null
+    if (currentIndex < STEPS.length - 1) {
+      setCurrentStep(STEPS[currentIndex + 1].id)
     }
   }
 
@@ -779,6 +740,51 @@ export function DashboardNew() {
     const currentIndex = STEPS.findIndex((step) => step.id === currentStep)
     if (currentIndex > 0) {
       setCurrentStep(STEPS[currentIndex - 1].id)
+    }
+  }
+
+  // Add this function to handle submitting all bank statements to the backend
+  const submitAllBankStatements = async () => {
+    if (bankStatements.length === 0) return null
+
+    setDebugInfo("Submitting all bank statements to backend...")
+
+    try {
+      // Create a FormData object to hold all bank statements
+      const formData = new FormData()
+
+      // Append each bank statement with the correct field name
+      bankStatements.forEach((file, index) => {
+        formData.append("bank_statement", file)
+      })
+
+      // Add file type indicator
+      formData.append("file_type", "bank_statement_batch")
+
+      // Send to the backend
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/upload-batch`,
+        {
+          method: "POST",
+          body: formData,
+        },
+      )
+
+      if (!response.ok) {
+        throw new Error(`API returned status: ${response.status}`)
+      }
+
+      const result = await response.json()
+      console.log("Batch bank statement submission result:", result)
+
+      setDebugInfo("All bank statements submitted successfully")
+
+      return result
+    } catch (error) {
+      console.error("Error submitting bank statements:", error)
+      setDebugInfo(`Error submitting bank statements: ${error.message}`)
+      // Continue with the process even if this fails
+      return null
     }
   }
 
@@ -814,12 +820,15 @@ export function DashboardNew() {
         application: application,
       })
 
-      // Set up progress updates focusing on bank statement analysis
-      setDebugInfo("Initializing bank statement analysis...")
+      // Submit all bank statements to the backend
+      await submitAllBankStatements()
+
+      // Set up progress updates
+      setDebugInfo("Initializing analysis...")
       setProgress(5)
       await new Promise((resolve) => setTimeout(resolve, 300))
 
-      setDebugInfo("Processing bank statements...")
+      setDebugInfo("Processing documents...")
       setProgress(30)
       await new Promise((resolve) => setTimeout(resolve, 500))
 
@@ -827,123 +836,205 @@ export function DashboardNew() {
       const creditScore = Number.parseInt(formData.creditScore)
       const timeInBusiness = Number.parseInt(formData.timeInBusiness)
       const fundingAmount = Number.parseInt(formData.fundingAmount.replace(/,/g, ""))
+      const monthlyRevenue = Number.parseInt(formData.monthlyRevenue)
+      const avgDailyBalance = Number.parseInt(formData.avgDailyBalance)
+      const negativeDays = Number.parseInt(formData.negativeDays)
 
       // Check for valid numeric values
-      if (isNaN(creditScore) || isNaN(timeInBusiness) || isNaN(fundingAmount)) {
-        throw new Error("Please enter valid numeric values for credit score, time in business, and funding amount")
+      if (isNaN(creditScore) || isNaN(timeInBusiness) || isNaN(fundingAmount) || isNaN(monthlyRevenue)) {
+        throw new Error("Please enter valid numeric values for all required fields")
       }
 
-      // Merge form data with the application data
-      const formDataForAnalysis = {
-        businessName: formData.businessName,
-        creditScore: creditScore,
-        timeInBusiness: timeInBusiness,
-        fundingRequested: fundingAmount,
+      // Prepare business data for the API with all verified data
+      const businessData = {
+        business_name: formData.businessName,
+        credit_score: creditScore,
+        time_in_business: timeInBusiness,
+        funding_requested: fundingAmount,
         state: formData.state,
         industry: formData.industry,
-        // Add bank analysis data if available
-        ...(bankAnalysisResults && {
-          avgMonthlyRevenue: bankAnalysisResults.avgMonthlyRevenue,
-          nsfs: bankAnalysisResults.nsfDays,
-          existingMcaCount: bankAnalysisResults.existingMcaCount,
-          mcaLenders: bankAnalysisResults.mcaLenders,
-          depositConsistency: bankAnalysisResults.depositConsistency,
-        }),
+        email: formData.email,
+        phone_number: formData.phoneNumber,
+        monthly_revenue: monthlyRevenue,
+        avg_daily_balance: avgDailyBalance,
+        nsf_days: negativeDays,
+        existing_mca_count: formData.hasExistingLoans ? 1 : 0,
+        has_existing_loans: formData.hasExistingLoans,
+        deposit_consistency: bankAnalysisResults?.depositConsistency || 0,
+        data_verified: formData.dataVerified,
       }
 
       setDebugInfo("Finalizing document analysis...")
       setProgress(70)
 
-      // Create a controller to abort the analysis if it takes too long
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+      // If we already have matched lenders from the initial upload, use those
+      if (matchedLenders.length > 0) {
+        setDebugInfo("Using previously matched lenders...")
+        setProgress(90)
 
-      try {
-        // Use a simpler approach that won't get stuck
-        // Instead of waiting for the full document analysis, we'll use the form data directly
+        // Create an analysis result for the application context with verified data
         const result: AnalysisResult = {
-          businessName: formDataForAnalysis.businessName,
-          creditScore: formDataForAnalysis.creditScore,
-          timeInBusiness: formDataForAnalysis.timeInBusiness,
-          fundingRequested: formDataForAnalysis.fundingRequested,
-          state: formDataForAnalysis.state,
-          industry: formDataForAnalysis.industry,
-          avgDailyBalance: bankAnalysisResults?.avgMonthlyRevenue * 0.3 || 10000,
-          avgMonthlyRevenue: bankAnalysisResults?.avgMonthlyRevenue || 30000,
-          hasExistingLoans: bankAnalysisResults?.existingMcaCount ? bankAnalysisResults.existingMcaCount > 0 : false,
-          nsfs: bankAnalysisResults?.nsfDays || 0,
-          largestDeposit: bankAnalysisResults?.avgMonthlyRevenue * 0.4 || 12000,
+          businessName: formData.businessName,
+          creditScore: creditScore,
+          timeInBusiness: timeInBusiness,
+          fundingRequested: fundingAmount,
+          state: formData.state,
+          industry: formData.industry,
+          avgDailyBalance: avgDailyBalance,
+          avgMonthlyRevenue: monthlyRevenue,
+          hasExistingLoans: formData.hasExistingLoans,
+          nsfs: negativeDays,
+          largestDeposit: monthlyRevenue * 0.4,
           depositConsistency: bankAnalysisResults?.depositConsistency || 85,
-          endingBalance: bankAnalysisResults?.avgMonthlyRevenue * 0.3 || 9000,
-          monthlyDeposits: [25000, 30000, 28000],
+          endingBalance: avgDailyBalance,
+          monthlyDeposits: [monthlyRevenue * 0.8, monthlyRevenue, monthlyRevenue * 1.1],
           dailyBalances: Array.from({ length: 30 }, (_, i) => ({
             date: new Date(Date.now() - (29 - i) * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-            balance: 8000 + Math.random() * 4000,
+            balance: avgDailyBalance * (0.8 + Math.random() * 0.4),
           })),
           analysisSuccess: true,
           extractedFields: ["businessName", "creditScore", "timeInBusiness", "fundingRequested", "state", "industry"],
-          debugInfo: "Analysis completed using form data and bank statement analysis",
+          debugInfo: "Analysis completed using verified data and previously matched lenders",
         }
-
-        // Start the document analysis in the background but don't wait for it
-        analyzeDocuments(application, bankStatements, formDataForAnalysis)
-          .then((fullResult) => {
-            console.log("Full document analysis completed:", fullResult)
-            // We could update the UI here if needed, but we're not waiting for this
-          })
-          .catch((err) => {
-            console.error("Background document analysis failed:", err)
-          })
-
-        clearTimeout(timeoutId)
-
-        setDebugInfo(`Document analysis complete. Using form data for matching.`)
-        setProgress(75)
 
         // Set the application data
         setApplicationData(result)
 
-        // Now find matching lenders
-        setDebugInfo("Finding matching lenders...")
-        setProgress(80)
-        await new Promise((resolve) => setTimeout(resolve, 400))
+        // Set the matching lenders in the context
+        setContextMatchingLenders(matchedLenders)
+      } else {
+        // If we don't have matched lenders, try to get them from the API
+        try {
+          setDebugInfo("Sending verified data to lender matching API...")
 
-        setDebugInfo("Evaluating lender criteria...")
-        setProgress(85)
-        await new Promise((resolve) => setTimeout(resolve, 300))
+          // Create a controller to abort the analysis if it takes too long
+          const controller = new AbortController()
+          const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
 
-        setDebugInfo("Ranking potential matches...")
-        setProgress(90)
-        await new Promise((resolve) => setTimeout(resolve, 300))
+          // Call the backend API to match lenders with verified data
+          const response = await fetch(
+            `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/match-lenders`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(businessData),
+              signal: controller.signal,
+            },
+          )
 
-        // Find matching lenders - use matchLendersToApplication with user ID to only match with user's lenders
-        const matches = await matchLendersToApplication(result, user?.id)
-        setMatchingLenders(matches)
+          clearTimeout(timeoutId)
 
-        setDebugInfo(`Found ${matches.length} matching lenders. Preparing results...`)
-        setProgress(95)
-        await new Promise((resolve) => setTimeout(resolve, 400))
+          if (response.ok) {
+            const lenderData = await response.json()
+            console.log("Lender matching API response:", lenderData)
 
-        setProgress(100)
+            // Transform the lender data if needed
+            if (Array.isArray(lenderData)) {
+              const lenders: MatchedLender[] = lenderData.map((lender) => ({
+                id: lender.id || `lender-${Math.random().toString(36).substr(2, 9)}`,
+                name: lender.name || "Unknown Lender",
+                description: lender.description || "No description available",
+                matchScore: lender.match_score || Math.floor(Math.random() * 30) + 70,
+                minFunding: lender.min_funding || 10000,
+                maxFunding: lender.max_funding || 500000,
+                factorRate: lender.factor_rate || 1.2,
+                termLength: lender.term_length || 12,
+                requirements: lender.requirements || [],
+                contactEmail: lender.contact_email,
+                contactPhone: lender.contact_phone,
+                logoUrl: lender.logo_url,
+              }))
 
-        setTimeout(() => {
-          setIsProcessing(false)
-          setIsAnalyzing(false)
-          goToNextStep()
+              setMatchedLenders(lenders)
+              setContextMatchingLenders(lenders)
+            }
+          }
 
-          toast({
-            title: "Analysis Complete",
-            description: `Your documents have been processed. Found ${matches.length} matching lenders.`,
-          })
-        }, 500)
-      } catch (abortError) {
-        clearTimeout(timeoutId)
-        if (abortError.name === "AbortError") {
-          throw new Error("Document analysis timed out. Using form data for matching instead.")
-        } else {
-          throw abortError
+          // Create an analysis result for the application context with verified data
+          const result: AnalysisResult = {
+            businessName: formData.businessName,
+            creditScore: creditScore,
+            timeInBusiness: timeInBusiness,
+            fundingRequested: fundingAmount,
+            state: formData.state,
+            industry: formData.industry,
+            avgDailyBalance: avgDailyBalance,
+            avgMonthlyRevenue: monthlyRevenue,
+            hasExistingLoans: formData.hasExistingLoans,
+            nsfs: negativeDays,
+            largestDeposit: monthlyRevenue * 0.4,
+            depositConsistency: bankAnalysisResults?.depositConsistency || 85,
+            endingBalance: avgDailyBalance,
+            monthlyDeposits: [monthlyRevenue * 0.8, monthlyRevenue, monthlyRevenue * 1.1],
+            dailyBalances: Array.from({ length: 30 }, (_, i) => ({
+              date: new Date(Date.now() - (29 - i) * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+              balance: avgDailyBalance * (0.8 + Math.random() * 0.4),
+            })),
+            analysisSuccess: true,
+            extractedFields: ["businessName", "creditScore", "timeInBusiness", "fundingRequested", "state", "industry"],
+            debugInfo: "Analysis completed using verified data and backend API",
+          }
+
+          // Set the application data
+          setApplicationData(result)
+        } catch (apiError) {
+          console.error("Error using lender matching API:", apiError)
+          setDebugInfo("API lender matching failed. Falling back to local matching...")
+
+          // Use a simpler approach that won't get stuck
+          // Instead of waiting for the full document analysis, we'll use the verified form data
+          const result: AnalysisResult = {
+            businessName: formData.businessName,
+            creditScore: creditScore,
+            timeInBusiness: timeInBusiness,
+            fundingRequested: fundingAmount,
+            state: formData.state,
+            industry: formData.industry,
+            avgDailyBalance: avgDailyBalance,
+            avgMonthlyRevenue: monthlyRevenue,
+            hasExistingLoans: formData.hasExistingLoans,
+            nsfs: negativeDays,
+            largestDeposit: monthlyRevenue * 0.4,
+            depositConsistency: bankAnalysisResults?.depositConsistency || 85,
+            endingBalance: avgDailyBalance,
+            monthlyDeposits: [monthlyRevenue * 0.8, monthlyRevenue, monthlyRevenue * 1.1],
+            dailyBalances: Array.from({ length: 30 }, (_, i) => ({
+              date: new Date(Date.now() - (29 - i) * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+              balance: avgDailyBalance * (0.8 + Math.random() * 0.4),
+            })),
+            analysisSuccess: true,
+            extractedFields: ["businessName", "creditScore", "timeInBusiness", "fundingRequested", "state", "industry"],
+            debugInfo: "Analysis completed using verified form data and bank statement analysis",
+          }
+
+          // Set the application data
+          setApplicationData(result)
+
+          // Find matching lenders using the local method with verified data
+          const localMatchedLenders = await matchLendersToApplication(result, user?.id)
+          setMatchedLenders(localMatchedLenders)
+          setContextMatchingLenders(localMatchedLenders)
         }
       }
+
+      setDebugInfo(`Found ${matchedLenders.length} matching lenders. Preparing results...`)
+      setProgress(95)
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      setProgress(100)
+
+      setTimeout(() => {
+        setIsProcessing(false)
+        setIsAnalyzing(false)
+        goToNextStep()
+
+        toast({
+          title: "Analysis Complete",
+          description: `Your verified data has been processed. Found ${matchedLenders.length} matching lenders.`,
+        })
+      }, 500)
     } catch (error) {
       console.error("Error analyzing documents:", error)
       setIsProcessing(false)
@@ -956,7 +1047,9 @@ export function DashboardNew() {
 
       // Provide more helpful debug info
       if (error instanceof Error) {
-        setDebugInfo(`Error: ${error.message}\nStack: ${error.stack}\nLast step: ${debugInfo}`)
+        setDebugInfo(`Error: ${error.message}
+Stack: ${error.stack}
+Last step: ${debugInfo}`)
       } else {
         setDebugInfo(`Unknown error occurred. Last step: ${debugInfo}`)
       }
@@ -968,7 +1061,7 @@ export function DashboardNew() {
         variant: "warning",
       })
 
-      // Even if analysis fails, try to continue with form data
+      // Even if analysis fails, try to continue with verified form data
       try {
         const fallbackResult: AnalysisResult = {
           businessName: formData.businessName,
@@ -977,10 +1070,10 @@ export function DashboardNew() {
           fundingRequested: Number.parseInt(formData.fundingAmount.replace(/,/g, "")) || 50000,
           state: formData.state,
           industry: formData.industry,
-          avgDailyBalance: 10000,
-          avgMonthlyRevenue: 30000,
-          hasExistingLoans: false,
-          nsfs: 0,
+          avgDailyBalance: Number.parseInt(formData.avgDailyBalance) || 10000,
+          avgMonthlyRevenue: Number.parseInt(formData.monthlyRevenue) || 30000,
+          hasExistingLoans: formData.hasExistingLoans,
+          nsfs: Number.parseInt(formData.negativeDays) || 0,
           largestDeposit: 12000,
           depositConsistency: 85,
           endingBalance: 9000,
@@ -991,14 +1084,15 @@ export function DashboardNew() {
           })),
           analysisSuccess: true,
           extractedFields: ["businessName", "creditScore", "timeInBusiness", "fundingRequested", "state", "industry"],
-          debugInfo: "Fallback analysis using form data only",
+          debugInfo: "Fallback analysis using verified form data only",
         }
 
         setApplicationData(fallbackResult)
 
         // Try to find matching lenders with the fallback data
         const fallbackMatches = await matchLendersToApplication(fallbackResult, user?.id)
-        setMatchingLenders(fallbackMatches)
+        setMatchedLenders(fallbackMatches)
+        setContextMatchingLenders(fallbackMatches)
 
         setIsProcessing(false)
         setIsAnalyzing(false)
@@ -1006,7 +1100,7 @@ export function DashboardNew() {
 
         toast({
           title: "Fallback Analysis Complete",
-          description: `Using your entered information, we found ${fallbackMatches.length} matching lenders.`,
+          description: `Using your verified information, we found ${fallbackMatches.length} matching lenders.`,
         })
       } catch (fallbackError) {
         console.error("Fallback matching also failed:", fallbackError)
@@ -1058,7 +1152,7 @@ export function DashboardNew() {
     }
   }
 
-  // Render step indicators
+  // Render step indicators - moved inside the component
   const renderStepIndicators = () => {
     return (
       <div className="flex items-center justify-between mb-8 w-full">
@@ -1094,26 +1188,8 @@ export function DashboardNew() {
     )
   }
 
-  // Render upload step
+  // Render upload step - moved inside the component
   const renderUploadStep = () => {
-    const runDiagnostics = async () => {
-      try {
-        const diagnostics = await runSupabaseDiagnostics()
-        console.log("Supabase Diagnostics:", diagnostics)
-        toast({
-          title: "Diagnostics Complete",
-          description: "Check the console for diagnostics information.",
-        })
-      } catch (error) {
-        console.error("Error running diagnostics:", error)
-        toast({
-          title: "Diagnostics Failed",
-          description: "Failed to run diagnostics. Check the console for errors.",
-          variant: "destructive",
-        })
-      }
-    }
-
     return (
       <div className="space-y-6">
         <div className="text-center">
@@ -1121,16 +1197,9 @@ export function DashboardNew() {
           <p className="mt-1 text-sm text-gray-500">Upload your bank statements and application form</p>
         </div>
 
-        {!pdfWorkerInitialized && (
-          <Alert variant="warning" className="bg-amber-50 border-amber-200">
-            <AlertTriangle className="h-4 w-4 text-amber-500" />
-            <AlertTitle className="text-amber-700">PDF Processing Limited</AlertTitle>
-            <AlertDescription className="text-amber-600">
-              PDF processing is currently limited. You can still upload PDF files, but automatic analysis may not work.
-              The system will still process your documents when you click "Analyze & Find Matches".
-            </AlertDescription>
-          </Alert>
-        )}
+        <div className="bg-blue-50 text-blue-700 text-sm rounded-md p-3 mb-4">
+          Files will be uploaded to the backend API for processing. All data is securely transmitted and analyzed.
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <Card>
@@ -1248,7 +1317,7 @@ export function DashboardNew() {
                   <div className="flex justify-between text-sm mb-1">
                     <span>
                       {uploadProgress < 50
-                        ? "Uploading to storage..."
+                        ? "Uploading to API..."
                         : uploadProgress < 90
                           ? "Extracting information..."
                           : "Processing complete"}
@@ -1300,10 +1369,17 @@ export function DashboardNew() {
           </Card>
         </div>
 
-        <div className="mt-6 pt-4 border-t border-gray-200">
-          <Button onClick={runDiagnostics} variant="outline" size="sm" className="text-gray-500">
-            Run Storage Diagnostics
-          </Button>
+        <div className="bg-amber-50 border border-amber-200 p-4 rounded-md text-amber-800 mb-4">
+          <div className="flex items-start">
+            <AlertTriangle className="h-5 w-5 mr-2 mt-0.5" />
+            <div>
+              <p className="font-medium">Important</p>
+              <p className="text-sm">
+                Document analysis will begin when you click "Continue to Information". Make sure you've uploaded both
+                bank statements and your application before proceeding.
+              </p>
+            </div>
+          </div>
         </div>
 
         <div className="flex justify-end">
@@ -1345,7 +1421,7 @@ export function DashboardNew() {
         <div className="text-center">
           <h2 className="text-2xl font-bold text-gray-900">Business Information</h2>
           <p className="mt-1 text-sm text-gray-500">
-            Enter the business details to help us match with suitable lenders
+            Verify and edit the extracted business details before proceeding to lender matching
           </p>
         </div>
 
@@ -1354,8 +1430,8 @@ export function DashboardNew() {
             <CheckCircle className="h-4 w-4 text-green-500" />
             <AlertTitle className="text-green-700">Information Extracted</AlertTitle>
             <AlertDescription className="text-green-600">
-              We've automatically extracted some information from your application. Please verify all fields and
-              complete any missing information before proceeding.
+              We've automatically extracted information from your documents. Please verify all fields and complete any
+              missing information before proceeding.
             </AlertDescription>
           </Alert>
         )}
@@ -1395,6 +1471,32 @@ export function DashboardNew() {
                 value={formData.timeInBusiness}
                 onChange={handleFormChange}
                 placeholder="Enter time in business in months"
+                type="number"
+                min="0"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="monthlyRevenue">Monthly Revenue</Label>
+              <Input
+                id="monthlyRevenue"
+                name="monthlyRevenue"
+                value={formData.monthlyRevenue}
+                onChange={handleFormChange}
+                placeholder="Enter monthly revenue"
+                type="number"
+                min="0"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="avgDailyBalance">Average Daily Balance</Label>
+              <Input
+                id="avgDailyBalance"
+                name="avgDailyBalance"
+                value={formData.avgDailyBalance}
+                onChange={handleFormChange}
+                placeholder="Enter average daily balance"
                 type="number"
                 min="0"
               />
@@ -1451,7 +1553,56 @@ export function DashboardNew() {
                 </SelectContent>
               </Select>
             </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="negativeDays">Negative Days</Label>
+              <Input
+                id="negativeDays"
+                name="negativeDays"
+                value={formData.negativeDays}
+                onChange={handleFormChange}
+                placeholder="Enter number of negative days"
+                type="number"
+                min="0"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="hasExistingLoans"
+                  checked={formData.hasExistingLoans}
+                  onCheckedChange={(checked) =>
+                    setFormData((prev) => ({ ...prev, hasExistingLoans: checked === true }))
+                  }
+                />
+                <Label htmlFor="hasExistingLoans">Has Existing Loans</Label>
+              </div>
+            </div>
           </div>
+        </div>
+
+        <div className="mt-6 pt-4 border-t border-gray-200">
+          <div className="flex items-center space-x-2 mb-4">
+            <Checkbox
+              id="dataVerified"
+              checked={formData.dataVerified}
+              onCheckedChange={(checked) => setFormData((prev) => ({ ...prev, dataVerified: checked === true }))}
+            />
+            <Label htmlFor="dataVerified" className="font-medium text-amber-600">
+              I have verified that all information is correct
+            </Label>
+          </div>
+
+          {!formData.dataVerified && (
+            <Alert variant="warning" className="bg-amber-50 border-amber-200 mb-4">
+              <AlertTriangle className="h-4 w-4 text-amber-500" />
+              <AlertTitle className="text-amber-700">Verification Required</AlertTitle>
+              <AlertDescription className="text-amber-600">
+                Please review all information and check the verification box above before proceeding.
+              </AlertDescription>
+            </Alert>
+          )}
         </div>
 
         <div className="flex justify-between">
@@ -1526,6 +1677,14 @@ export function DashboardNew() {
               <div className="flex justify-between items-center">
                 <span className="text-sm font-medium">Industry:</span>
                 <span className="text-sm">{formData.industry}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium">Email:</span>
+                <span className="text-sm">{formData.email || "Not provided"}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium">Phone Number:</span>
+                <span className="text-sm">{formData.phoneNumber || "Not provided"}</span>
               </div>
             </CardContent>
           </Card>
@@ -1790,9 +1949,9 @@ export function DashboardNew() {
           </TabsContent>
 
           <TabsContent value="lenders" className="space-y-4 pt-4">
-            {matchingLenders && matchingLenders.length > 0 ? (
+            {matchedLenders && matchedLenders.length > 0 ? (
               <div className="space-y-4">
-                {matchingLenders.map((lender, index) => (
+                {matchedLenders.map((lender, index) => (
                   <Card key={index}>
                     <CardHeader className="pb-2">
                       <div className="flex justify-between items-center">
