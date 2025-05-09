@@ -1,3 +1,8 @@
+import * as pdfjsLib from "pdfjs-dist";
+import pdfWorker from "pdfjs-dist/build/pdf.worker.js";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
+
 import { type NextRequest, NextResponse } from "next/server"
 import * as pdfjs from "pdfjs-dist"
 import { createWorker } from "tesseract.js"
