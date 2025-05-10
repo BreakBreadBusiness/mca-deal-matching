@@ -1,5 +1,3 @@
-// Make sure the layout is correct and not interfering with the dashboard
-
 import type React from "react"
 import { Navbar } from "@/components/navbar"
 
