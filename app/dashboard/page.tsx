@@ -1,15 +1,17 @@
-import { DashboardNew } from "@/components/dashboard-new"
+import { Navbar } from "@/components/navbar"
+import { Dashboard } from "@/components/dashboard"
+import { ProtectedRoute } from "@/components/protected-route"
 import { ApplicationProvider } from "@/context/application-context"
 
 export default function DashboardPage() {
   return (
-    <div className="container mx-auto py-6">
-      {/* Wrap DashboardNew with ApplicationProvider */}
-      <ApplicationProvider>
-        <DashboardNew />
-      </ApplicationProvider>
-
-      {/* Add the diagnostics component at the bottom of the page */}
-    </div>
+    <ProtectedRoute>
+      <main className="min-h-screen bg-gray-50">
+        <Navbar />
+        <ApplicationProvider>
+          <Dashboard />
+        </ApplicationProvider>
+      </main>
+    </ProtectedRoute>
   )
 }

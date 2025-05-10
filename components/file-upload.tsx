@@ -2,8 +2,8 @@
 
 import type React from "react"
 
-import { useState, useRef, useEffect } from "react"
-import { Upload, FileText, FileSpreadsheet, AlertCircle, Search, AlertTriangle } from "lucide-react"
+import { useState, useRef } from "react"
+import { Upload, FileText, FileSpreadsheet, AlertCircle, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { useToast } from "@/hooks/use-toast"
@@ -11,8 +11,6 @@ import { useApplication } from "@/context/application-context"
 import { analyzeDocuments } from "@/lib/document-analyzer"
 import { findMatchingLenders } from "@/lib/lender-matcher"
 import { useAuth } from "@/context/auth-context"
-import { extractBankText, analyzeBankTransactions, initPdfWorker } from "@/lib/bank-analyzer"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 
 interface FileUploadProps {
   onAnalysisComplete: () => void
@@ -26,7 +24,6 @@ export function FileUpload({ onAnalysisComplete, onMatchingComplete }: FileUploa
   const [isMatching, setIsMatching] = useState(false)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
-  const [pdfWorkerError, setPdfWorkerError] = useState<boolean>(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const applicationInputRef = useRef<HTMLInputElement>(null)
   const { toast } = useToast()
@@ -34,95 +31,11 @@ export function FileUpload({ onAnalysisComplete, onMatchingComplete }: FileUploa
 
   const { user } = useAuth()
 
-  // Initialize PDF.js worker when component mounts
-  useEffect(() => {
-    try {
-      initPdfWorker()
-      setPdfWorkerError(false)
-    } catch (error) {
-      console.error("Failed to initialize PDF.js worker:", error)
-      setPdfWorkerError(true)
-    }
-  }, [])
-
-  const handleBankStatementUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleBankStatementUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const filesArray = Array.from(e.target.files)
       setBankStatements((prev) => [...prev, ...filesArray])
-
-      // Only attempt PDF analysis if we're not in an error state
-      if (!pdfWorkerError) {
-        try {
-          // Process the first file for immediate analysis
-          const file = filesArray[0]
-
-          // Check if it's a PDF before attempting PDF-specific processing
-          if (file.type === "application/pdf") {
-            setIsUploading(true)
-            setProgress(10)
-
-            try {
-              // Extract text from the bank statement
-              const text = await extractBankText(file)
-              setProgress(50)
-
-              // Analyze the extracted text
-              const analysis = analyzeBankTransactions(text)
-              setProgress(90)
-
-              console.log("Bank Analysis Result:", analysis)
-
-              // Update application data with bank analysis results
-              if (analysis.analysisSuccess) {
-                setApplicationData((prev) => ({
-                  ...prev,
-                  avgMonthlyRevenue: analysis.avgMonthlyRevenue,
-                  nsfs: analysis.nsfDays,
-                  negativeDays: analysis.nsfDays, // Using NSF days as a proxy for negative days
-                  hasExistingLoans: analysis.existingMcaCount > 0,
-                  existingMcaCount: analysis.existingMcaCount,
-                  mcaLenders: analysis.mcaLenders,
-                  depositConsistency: analysis.depositConsistency * 100, // Convert to percentage
-                  avgDailyBalance: analysis.avgDailyBalance,
-                  totalDeposits: analysis.totalDeposits,
-                }))
-
-                toast({
-                  title: "Bank Statement Analysis Complete",
-                  description: `Detected ${analysis.existingMcaCount} MCA loans and ${formatCurrency(analysis.avgMonthlyRevenue)} average monthly revenue.`,
-                })
-              } else {
-                toast({
-                  title: "Analysis Completed with Issues",
-                  description: analysis.errorMessage || "Some data couldn't be extracted properly.",
-                  variant: "warning",
-                })
-              }
-            } catch (pdfError) {
-              console.error("PDF processing error:", pdfError)
-              // Don't show an error toast here, just log it
-              // We'll still keep the file in the list
-            }
-          } else {
-            // For non-PDF files, just add them to the list without analysis
-            console.log("Non-PDF file added:", file.name)
-          }
-        } catch (error) {
-          console.error("Error analyzing bank statement:", error)
-          // Don't show an error toast here, just log it
-        } finally {
-          setIsUploading(false)
-          setProgress(0)
-        }
-      }
     }
-  }
-
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-    }).format(amount)
   }
 
   const handleApplicationUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -283,24 +196,6 @@ export function FileUpload({ onAnalysisComplete, onMatchingComplete }: FileUploa
         </p>
       </div>
 
-      {pdfWorkerError && (
-        <Alert variant="warning" className="bg-amber-50 border-amber-200">
-          <AlertTriangle className="h-4 w-4 text-amber-500" />
-          <AlertTitle className="text-amber-700">PDF Processing Limited</AlertTitle>
-          <AlertDescription className="text-amber-600">
-            PDF processing is currently limited. You can still upload PDF files, but automatic analysis may not work.
-            The system will still process your documents when you click "Analyze & Find Matches".
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded relative" role="alert">
-          <strong className="font-bold">Error: </strong>
-          <span className="block sm:inline">{error}</span>
-        </div>
-      )}
-
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Bank Statements Upload */}
         <div className="space-y-4">
@@ -396,6 +291,13 @@ export function FileUpload({ onAnalysisComplete, onMatchingComplete }: FileUploa
           )}
         </div>
       </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded relative" role="alert">
+          <strong className="font-bold">Error: </strong>
+          <span className="block sm:inline">{error}</span>
+        </div>
+      )}
 
       {isUploading && (
         <div className="space-y-2">
