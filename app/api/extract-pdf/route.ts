@@ -2,32 +2,41 @@ import { type NextRequest, NextResponse } from "next/server"
 import pdfParse from "pdf-parse"
 import { createWorker } from "tesseract.js"
 
-// OCR fallback
-async function extractTextWithOcr(pdfData: Buffer): Promise<string> {
-  const worker = await createWorker()
-  const { data } = await worker.recognize(pdfData)
+// OCR fallback if pdfParse fails
+async function extractTextWithOcr(buffer: Buffer): Promise<string> {
+  const worker = await createWorker("eng")
+  const {
+    data: { text },
+  } = await worker.recognize(buffer)
   await worker.terminate()
-  return data.text
+  return text
 }
 
-// Extract and parse text
+// Parse text for fields
 function parseFields(text: string) {
-  const parsedFields: any = {}
+  const parsedFields: {
+    businessName?: string
+    creditScore?: number
+    timeInBusiness?: number
+    fundingRequested?: number
+    state?: string
+    industry?: string
+  } = {}
 
-  const match = (regex: RegExp) => {
-    const result = text.match(regex)
-    return result && result[1]?.trim()
+  const getMatch = (regex: RegExp) => {
+    const match = text.match(regex)
+    return match?.[1]?.trim()
   }
 
-  parsedFields.businessName = match(/business\s*name\s*:?\s*([\w\s&.,'-]+)/i)
-  parsedFields.creditScore = parseInt(match(/credit\s*score\s*:?\s*(\d{3,})/i)) || undefined
-  parsedFields.timeInBusiness = parseInt(match(/time\s*in\s*business\s*:?\s*(\d+)/i)) || undefined
+  parsedFields.businessName = getMatch(/business\s*name\s*:?\s*([\w\s&.,'-]+)/i) || undefined
+  parsedFields.creditScore = parseInt(getMatch(/credit\s*score\s*:?\s*(\d{3,})/i) || "") || undefined
+  parsedFields.timeInBusiness = parseInt(getMatch(/time\s*in\s*business\s*:?\s*(\d+)/i) || "") || undefined
 
-  const funding = match(/funding\s*(?:requested|amount|needed)\s*:?\s*\$?\s*([\d,\.]+)/i)
-  parsedFields.fundingRequested = funding ? parseInt(funding.replace(/,/g, "")) : undefined
+  const fundingRaw = getMatch(/funding\s*(?:requested|amount|needed)\s*:?\s*\$?\s*([\d,\.]+)/i)
+  parsedFields.fundingRequested = fundingRaw ? parseInt(fundingRaw.replace(/,/g, "")) : undefined
 
-  const state = match(/state\s*:?\s*([A-Z]{2})/i)
-  parsedFields.state = state?.toUpperCase()
+  const stateMatch = getMatch(/state\s*:?\s*([A-Z]{2})/i)
+  parsedFields.state = stateMatch ? stateMatch.toUpperCase() : undefined
 
   const industries = [
     "Restaurant", "Retail", "Healthcare", "Technology", "Construction", "Manufacturing",
@@ -35,35 +44,49 @@ function parseFields(text: string) {
     "Agriculture", "Energy", "Legal Services", "Automotive", "Beauty & Wellness",
     "Fitness", "Home Services", "Professional Services",
   ]
-  parsedFields.industry = industries.find(ind => text.toLowerCase().includes(ind.toLowerCase()))
+
+  parsedFields.industry = industries.find(ind =>
+    text.toLowerCase().includes(ind.toLowerCase())
+  )
 
   return parsedFields
 }
 
-// API handler
+// Main API handler
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json()
-    const { fileUrl, storageType } = body
+    const { fileUrl } = await request.json()
 
     if (!fileUrl) {
-      return NextResponse.json({ error: "No file URL provided" }, { status: 400 })
+      return NextResponse.json({ error: "Missing file URL" }, { status: 400 })
     }
 
     const response = await fetch(fileUrl)
     if (!response.ok) {
-      return NextResponse.json({ error: `Failed to download file: ${response.status}` }, { status: 500 })
+      return NextResponse.json(
+        { error: `Failed to fetch file: ${response.status}` },
+        { status: 500 }
+      )
     }
 
     const buffer = Buffer.from(await response.arrayBuffer())
 
     let extractedText: string
+    let method = "pdf-parse"
+
     try {
-      const result = await pdfParse(buffer)
-      extractedText = result.text
-    } catch (pdfError) {
-      console.warn("PDF parsing failed, using OCR fallback")
+      const parsed = await pdfParse(buffer)
+      extractedText = parsed.text.trim()
+
+      if (extractedText.length < 50) {
+        console.warn("Text too short, using OCR fallback")
+        extractedText = await extractTextWithOcr(buffer)
+        method = "ocr"
+      }
+    } catch (err) {
+      console.warn("pdf-parse failed, falling back to OCR")
       extractedText = await extractTextWithOcr(buffer)
+      method = "ocr"
     }
 
     const parsedFields = parseFields(extractedText)
@@ -72,11 +95,12 @@ export async function POST(request: NextRequest) {
       success: true,
       extractedText,
       parsedFields,
+      method,
     })
-  } catch (error) {
-    console.error("Error processing PDF:", error)
+  } catch (err) {
+    console.error("Error in /extract-pdf:", err)
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unknown error" },
+      { error: err instanceof Error ? err.message : "Unknown error" },
       { status: 500 }
     )
   }
