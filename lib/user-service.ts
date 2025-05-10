@@ -1,13 +1,4 @@
-import { createClient } from "@supabase/supabase-js"
-
-// Initialize Supabase client
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    persistSession: true,
-  },
-})
+import { supabase } from "@/lib/supabase-client"
 
 export type UserStatus = "pending" | "approved" | "rejected"
 export type UserRole = "user" | "admin"
@@ -21,36 +12,7 @@ export interface UserManagement {
   updated_at: string
 }
 
-// Create a record in the user_management table when a new user registers
-export async function registerUserForApproval(userId: string, email: string) {
-  try {
-    const response = await fetch("/api/user-management", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        action: "register",
-        userId,
-        email,
-      }),
-    })
-
-    if (!response.ok) {
-      const error = await response.json()
-      throw new Error(error.error || "Failed to register user for approval")
-    }
-
-    return true
-  } catch (error) {
-    console.error("Error registering for approval:", error)
-    throw error
-  }
-}
-
-// Add better error handling in the checkUserApprovalStatus function
-
-// Check if a user is approved
+// Check if a user is approved - Using API endpoint to avoid RLS issues
 export async function checkUserApprovalStatus(userId: string): Promise<UserStatus | null> {
   try {
     // Add retry logic with exponential backoff
@@ -112,6 +74,33 @@ export async function checkUserApprovalStatus(userId: string): Promise<UserStatu
   } catch (error) {
     console.error("Error checking user approval status:", error)
     return null
+  }
+}
+
+// Create a record in the user_management table when a new user registers
+export async function registerUserForApproval(userId: string, email: string) {
+  try {
+    const response = await fetch("/api/user-management", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        action: "register",
+        userId,
+        email,
+      }),
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.error || "Failed to register user for approval")
+    }
+
+    return true
+  } catch (error) {
+    console.error("Error registering for approval:", error)
+    throw error
   }
 }
 
@@ -268,8 +257,6 @@ export async function demoteToUser(userId: string): Promise<boolean> {
     throw error
   }
 }
-
-// Add better error handling in the isCurrentUserAdmin function
 
 // Check if current user is an admin - Using API endpoint to avoid RLS issues
 export async function isCurrentUserAdmin(): Promise<boolean> {

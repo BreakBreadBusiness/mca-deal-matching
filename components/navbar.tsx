@@ -49,6 +49,12 @@ export function Navbar() {
     )
   }
 
+  // Removed Underwriting from navigation items
+  const navigationItems = [
+    { name: "Dashboard", href: "/dashboard" },
+    { name: "Lenders", href: "/lenders" },
+  ]
+
   return (
     <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
       <div className="container mx-auto px-4">
@@ -79,6 +85,7 @@ export function Navbar() {
           <div className="hidden md:flex items-center space-x-8">
             <NavLink href="/dashboard">Dashboard</NavLink>
             <NavLink href="/lenders">Lender Management</NavLink>
+            {/* Removed Underwriting tab */}
 
             {/* Admin Section */}
             {user?.isAdmin && (
@@ -137,6 +144,7 @@ export function Navbar() {
               >
                 Lender Management
               </Link>
+              {/* Removed Underwriting from mobile menu */}
               {user?.isAdmin && (
                 <Link
                   href="/admin/users"

@@ -17,9 +17,13 @@ import {
   HelpCircle,
   AlertTriangle,
   AlertCircle,
+  Percent,
+  PieChart,
+  Users,
+  Code,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
@@ -30,6 +34,15 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { useApplication } from "@/context/application-context"
 import { findMatchingLenders } from "@/lib/lender-matcher"
 import { useToast } from "@/hooks/use-toast"
+import { Badge } from "@/components/ui/badge"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { createClient } from "@supabase/supabase-js"
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
+
+// Initialize Supabase client
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
 interface AnalysisResultsProps {
   onViewMatches: () => void
@@ -40,6 +53,8 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [editedData, setEditedData] = useState<any>(null)
   const { toast } = useToast()
+  const [isLoading, setIsLoading] = useState(false)
+  const [showDebugInfo, setShowDebugInfo] = useState(false)
 
   // Check if there were extraction issues
   const hasExtractionIssues =
@@ -61,13 +76,26 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
   useEffect(() => {
     const fetchMatchingLenders = async () => {
       if (applicationData) {
-        const matches = await findMatchingLenders(applicationData)
-        setMatchingLenders(matches)
+        setIsLoading(true)
+        try {
+          // In a real environment, this would fetch from the database
+          const matches = await findMatchingLenders(applicationData)
+          setMatchingLenders(matches)
+        } catch (error) {
+          console.error("Error fetching matching lenders:", error)
+          toast({
+            title: "Error",
+            description: "Failed to fetch matching lenders. Please try again.",
+            variant: "destructive",
+          })
+        } finally {
+          setIsLoading(false)
+        }
       }
     }
 
     fetchMatchingLenders()
-  }, [applicationData, setMatchingLenders])
+  }, [applicationData, setMatchingLenders, toast])
 
   if (isAnalyzing) {
     return (
@@ -123,23 +151,57 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
   }
 
   const handleSaveChanges = async () => {
-    // Remove any extraction issue flags
-    const cleanedData = { ...editedData }
-    delete cleanedData._missingFields
-    delete cleanedData._requiresManualEntry
-    delete cleanedData._error
+    setIsLoading(true)
+    try {
+      // Remove any extraction issue flags
+      const cleanedData = { ...editedData }
+      delete cleanedData._missingFields
+      delete cleanedData._requiresManualEntry
+      delete cleanedData._error
 
-    setApplicationData(cleanedData)
-    setIsEditing(false)
+      // In a real environment, this would save to the database
+      const { error } = await supabase
+        .from("applications")
+        .update({
+          business_name: cleanedData.businessName,
+          credit_score: cleanedData.creditScore,
+          time_in_business: cleanedData.timeInBusiness,
+          state: cleanedData.state,
+          industry: cleanedData.industry,
+          funding_requested: cleanedData.fundingRequested,
+          avg_daily_balance: cleanedData.avgDailyBalance,
+          avg_monthly_revenue: cleanedData.avgMonthlyRevenue,
+          has_existing_loans: cleanedData.hasExistingLoans,
+          nsfs: cleanedData.nsfs,
+          existing_mca_count: cleanedData.existingMcaCount,
+          total_outstanding_mca: cleanedData.totalOutstandingMca,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", cleanedData.id || "new")
 
-    // Recalculate matching lenders with the updated data
-    const matches = await findMatchingLenders(cleanedData)
-    setMatchingLenders(matches)
+      if (error) throw error
 
-    toast({
-      title: "Changes Saved",
-      description: "The application data has been updated.",
-    })
+      setApplicationData(cleanedData)
+      setIsEditing(false)
+
+      // Recalculate matching lenders with the updated data
+      const matches = await findMatchingLenders(cleanedData)
+      setMatchingLenders(matches)
+
+      toast({
+        title: "Changes Saved",
+        description: "The application data has been updated.",
+      })
+    } catch (error) {
+      console.error("Error saving changes:", error)
+      toast({
+        title: "Error",
+        description: "Failed to save changes. Please try again.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   const handleCancelEdit = () => {
@@ -226,10 +288,18 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
     "Agriculture",
     "Energy",
     "Legal Services",
+    "Automotive",
+    "Beauty & Wellness",
+    "Fitness",
+    "Home Services",
+    "Professional Services",
   ]
 
   // Get missing fields if any
   const missingFields = (applicationData as any)._missingFields || []
+
+  const debugInfo = applicationData?.debugInfo || "No debug information available"
+  const extractionAttempts = applicationData?.extractionAttempts || 0
 
   return (
     <div className="space-y-6">
@@ -251,15 +321,34 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
       )}
 
       <div className="flex justify-end">
+        {!isEditing && (
+          <Button onClick={() => setShowDebugInfo(!showDebugInfo)} variant="outline" className="mr-2">
+            <Code className="h-4 w-4 mr-2" />
+            {showDebugInfo ? "Hide Debug Info" : "Show Debug Info"}
+          </Button>
+        )}
         {isEditing ? (
           <div className="space-x-2">
-            <Button variant="outline" onClick={handleCancelEdit}>
+            <Button variant="outline" onClick={handleCancelEdit} disabled={isLoading}>
               <X className="h-4 w-4 mr-2" />
               Cancel
             </Button>
-            <Button onClick={handleSaveChanges} className="bg-green-600 hover:bg-green-700 text-white">
-              <Save className="h-4 w-4 mr-2" />
-              Save Changes
+            <Button
+              onClick={handleSaveChanges}
+              className="bg-green-600 hover:bg-green-700 text-white"
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <>
+                  <div className="animate-spin h-4 w-4 mr-2 border-2 border-white border-t-transparent rounded-full"></div>
+                  Saving...
+                </>
+              ) : (
+                <>
+                  <Save className="h-4 w-4 mr-2" />
+                  Save Changes
+                </>
+              )}
             </Button>
           </div>
         ) : (
@@ -396,19 +485,54 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
                     </div>
                   </div>
                   <div>
-                    <Label htmlFor="negativeDays" className="text-sm font-medium">
-                      Negative Days
+                    <Label htmlFor="nsfs" className="text-sm font-medium">
+                      NSF Count
                     </Label>
                     <Input
-                      id="negativeDays"
-                      name="negativeDays"
+                      id="nsfs"
+                      name="nsfs"
                       type="number"
-                      value={editedData.negativeDays || 0}
-                      onChange={(e) => handleNumberInputChange("negativeDays", e.target.value)}
+                      value={editedData.nsfs || 0}
+                      onChange={(e) => handleNumberInputChange("nsfs", e.target.value)}
                       min={0}
                       className="mt-1"
                     />
                   </div>
+
+                  {/* MCA Loan Information */}
+                  {editedData.hasExistingLoans && (
+                    <div>
+                      <Label htmlFor="existingMcaCount" className="text-sm font-medium">
+                        Number of MCA Loans
+                      </Label>
+                      <Input
+                        id="existingMcaCount"
+                        name="existingMcaCount"
+                        type="number"
+                        value={editedData.existingMcaCount || 1}
+                        onChange={(e) => handleNumberInputChange("existingMcaCount", e.target.value)}
+                        min={0}
+                        className="mt-1"
+                      />
+                    </div>
+                  )}
+
+                  {editedData.hasExistingLoans && (
+                    <div>
+                      <Label htmlFor="totalOutstandingMca" className="text-sm font-medium">
+                        Outstanding MCA Balance
+                      </Label>
+                      <Input
+                        id="totalOutstandingMca"
+                        name="totalOutstandingMca"
+                        type="number"
+                        value={editedData.totalOutstandingMca || 0}
+                        onChange={(e) => handleNumberInputChange("totalOutstandingMca", e.target.value)}
+                        min={0}
+                        className="mt-1"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div className="space-y-4">
@@ -551,6 +675,26 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
                     </div>
                   </div>
 
+                  {applicationData.hasExistingLoans && applicationData.existingMcaCount > 0 && (
+                    <div className="flex items-start space-x-3">
+                      <AlertCircle className="h-5 w-5 text-amber-600 mt-0.5" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-500">MCA Loans</p>
+                        <p className="text-lg font-semibold">{applicationData.existingMcaCount}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {applicationData.hasExistingLoans && applicationData.totalOutstandingMca > 0 && (
+                    <div className="flex items-start space-x-3">
+                      <DollarSign className="h-5 w-5 text-amber-600 mt-0.5" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-500">Outstanding MCA Balance</p>
+                        <p className="text-lg font-semibold">{formatCurrency(applicationData.totalOutstandingMca)}</p>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex items-start space-x-3">
                     {applicationData.hasPriorDefaults ? (
                       <CircleCheck className="h-5 w-5 text-amber-600 mt-0.5" />
@@ -575,12 +719,12 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
                     </div>
                   </div>
 
-                  {applicationData.negativeDays !== undefined && (
+                  {applicationData.nsfs !== undefined && (
                     <div className="flex items-start space-x-3">
                       <AlertCircle className="h-5 w-5 text-amber-600 mt-0.5" />
                       <div>
-                        <p className="text-sm font-medium text-gray-500">Negative Days</p>
-                        <p className="text-lg font-semibold">{applicationData.negativeDays}</p>
+                        <p className="text-sm font-medium text-gray-500">NSF Count</p>
+                        <p className="text-lg font-semibold">{applicationData.nsfs}</p>
                       </div>
                     </div>
                   )}
@@ -637,12 +781,215 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
                   {applicationData.creditScore}, the business is seeking{" "}
                   {formatCurrency(applicationData.fundingRequested)} in funding
                   {applicationData.fundingPurpose ? ` for ${applicationData.fundingPurpose.toLowerCase()}` : ""}.
+                  {applicationData.hasExistingLoans && applicationData.existingMcaCount > 0
+                    ? ` The business currently has ${applicationData.existingMcaCount} existing MCA loan${applicationData.existingMcaCount > 1 ? "s" : ""} with an outstanding balance of ${formatCurrency(applicationData.totalOutstandingMca)}.`
+                    : ""}
                 </p>
               </div>
             </>
           )}
         </CardContent>
       </Card>
+
+      {showDebugInfo && (
+        <Card className="mb-4 border-amber-300">
+          <CardHeader className="bg-amber-50">
+            <div className="flex justify-between items-center">
+              <CardTitle className="text-amber-800">Debug Information</CardTitle>
+              <Button variant="outline" size="sm" onClick={() => setShowDebugInfo(false)}>
+                Hide Debug Info
+              </Button>
+            </div>
+            <CardDescription className="text-amber-700">Extraction attempts: {extractionAttempts}</CardDescription>
+          </CardHeader>
+          <CardContent className="p-4">
+            <Accordion type="single" collapsible>
+              <AccordionItem value="debug">
+                <AccordionTrigger>View Extraction Details</AccordionTrigger>
+                <AccordionContent>
+                  <div className="bg-gray-100 p-4 rounded-md overflow-auto max-h-96">
+                    <pre className="text-xs whitespace-pre-wrap">{debugInfo}</pre>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          </CardContent>
+        </Card>
+      )}
+
+      <Tabs defaultValue="financial" className="space-y-4 pt-4">
+        <TabsList>
+          <TabsTrigger value="financial">Financials</TabsTrigger>
+          <TabsTrigger value="mca">MCA</TabsTrigger>
+        </TabsList>
+        <TabsContent value="financial" className="space-y-4 pt-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">Revenue Analysis</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center space-x-2">
+                      <DollarSign className="h-5 w-5 text-amber-600" />
+                      <span className="text-sm font-medium">Monthly Revenue</span>
+                    </div>
+                    <span className="font-bold">{formatCurrency(applicationData.avgMonthlyRevenue)}</span>
+                  </div>
+
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center space-x-2">
+                      <DollarSign className="h-5 w-5 text-amber-600" />
+                      <span className="text-sm font-medium">Largest Deposit</span>
+                    </div>
+                    <span className="font-bold">{formatCurrency(applicationData.largestDeposit || 0)}</span>
+                  </div>
+
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center space-x-2">
+                      <Percent className="h-5 w-5 text-amber-600" />
+                      <span className="text-sm font-medium">Deposit Consistency</span>
+                    </div>
+                    <span className="font-bold">{applicationData.depositConsistency || 0}%</span>
+                  </div>
+
+                  {applicationData.monthlyDeposits && applicationData.monthlyDeposits.length > 0 && (
+                    <div className="mt-2 pt-2 border-t border-gray-200">
+                      <p className="text-xs text-gray-500 mb-1">Last 3 Months Deposits</p>
+                      <div className="flex justify-between text-xs">
+                        <span>Month 1: {formatCurrency(applicationData.monthlyDeposits[0] || 0)}</span>
+                        <span>Month 2: {formatCurrency(applicationData.monthlyDeposits[1] || 0)}</span>
+                        <span>Month 3: {formatCurrency(applicationData.monthlyDeposits[2] || 0)}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">Balance Analysis</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center space-x-2">
+                      <DollarSign className="h-5 w-5 text-amber-600" />
+                      <span className="text-sm font-medium">Avg Daily Balance</span>
+                    </div>
+                    <span className="font-bold">{formatCurrency(applicationData.avgDailyBalance)}</span>
+                  </div>
+
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center space-x-2">
+                      <AlertTriangle className="h-5 w-5 text-amber-600" />
+                      <span className="text-sm font-medium">NSF Count</span>
+                    </div>
+                    <span className="font-bold">{applicationData.nsfs || 0}</span>
+                  </div>
+
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center space-x-2">
+                      <DollarSign className="h-5 w-5 text-amber-600" />
+                      <span className="text-sm font-medium">Ending Balance</span>
+                    </div>
+                    <span className="font-bold">{formatCurrency(applicationData.endingBalance || 0)}</span>
+                  </div>
+
+                  {applicationData.dailyBalances && applicationData.dailyBalances.length > 0 && (
+                    <div className="mt-2 pt-2 border-t border-gray-200">
+                      <p className="text-xs text-gray-500 mb-1">Balance Trend (Last 30 Days)</p>
+                      <div className="h-16 w-full">
+                        <div className="flex items-end h-full w-full">
+                          {applicationData.dailyBalances.slice(-10).map((day, i) => {
+                            const maxBalance = Math.max(...applicationData.dailyBalances.map((d) => d.balance))
+                            const height = Math.max(5, (day.balance / maxBalance) * 100)
+                            return (
+                              <div key={i} className="flex-1 mx-px">
+                                <div
+                                  className={`w-full bg-amber-500 rounded-t-sm ${day.balance < 0 ? "bg-red-500" : ""}`}
+                                  style={{ height: `${height}%` }}
+                                ></div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="mca" className="space-y-4 pt-4">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-lg">MCA Analysis</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {!applicationData.hasExistingLoans ? (
+                <div className="text-center py-4">
+                  <AlertCircle className="h-12 w-12 text-gray-400 mx-auto mb-2" />
+                  <p className="text-gray-500">No MCA loans detected in the provided bank statements.</p>
+                  <p className="text-sm text-gray-400 mt-1">
+                    If you know this business has MCA loans, you can manually add them in edit mode.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center space-x-2">
+                      <AlertCircle className="h-5 w-5 text-amber-600" />
+                      <span className="text-sm font-medium">Existing MCA Loans</span>
+                    </div>
+                    <Badge variant="destructive">Yes</Badge>
+                  </div>
+
+                  {applicationData.existingMcaCount !== undefined && (
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center space-x-2">
+                        <PieChart className="h-5 w-5 text-amber-600" />
+                        <span className="text-sm font-medium">MCA Count</span>
+                      </div>
+                      <span className="font-bold">{applicationData.existingMcaCount}</span>
+                    </div>
+                  )}
+
+                  {applicationData.mcaLenders && applicationData.mcaLenders.length > 0 && (
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center space-x-2">
+                        <Users className="h-5 w-5 text-amber-600" />
+                        <span className="text-sm font-medium">MCA Lenders</span>
+                      </div>
+                      <div className="flex flex-wrap justify-end gap-1">
+                        {applicationData.mcaLenders.map((lender, index) => (
+                          <Badge key={index} variant="secondary">
+                            {lender}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {applicationData.totalOutstandingMca !== undefined && applicationData.totalOutstandingMca > 0 && (
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center space-x-2">
+                        <DollarSign className="h-5 w-5 text-amber-600" />
+                        <span className="text-sm font-medium">Est. Outstanding MCA</span>
+                      </div>
+                      <span className="font-bold">{formatCurrency(applicationData.totalOutstandingMca)}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
 
       <div className="flex flex-col items-center space-y-4">
         {isEditing && (
@@ -658,9 +1005,19 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
               <Button
                 onClick={handleSaveChanges}
                 className="bg-green-600 hover:bg-green-700 text-white font-medium px-6 py-2"
+                disabled={isLoading}
               >
-                <Save className="h-4 w-4 mr-2" />
-                Save Changes
+                {isLoading ? (
+                  <>
+                    <div className="animate-spin h-4 w-4 mr-2 border-2 border-white border-t-transparent rounded-full"></div>
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <Save className="h-4 w-4 mr-2" />
+                    Save Changes
+                  </>
+                )}
               </Button>
             </div>
           </div>
@@ -694,10 +1051,19 @@ export function AnalysisResults({ onViewMatches }: AnalysisResultsProps) {
             <Button
               onClick={onViewMatches}
               className="bg-amber-600 hover:bg-amber-700 text-white px-6 py-2"
-              disabled={hasExtractionIssues}
+              disabled={hasExtractionIssues || isLoading}
             >
-              View Matching Lenders
-              <ArrowRight className="ml-2 h-4 w-4" />
+              {isLoading ? (
+                <>
+                  <div className="animate-spin h-4 w-4 mr-2 border-2 border-white border-t-transparent rounded-full"></div>
+                  Loading...
+                </>
+              ) : (
+                <>
+                  View Matching Lenders
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </>
+              )}
             </Button>
           )}
         </div>
