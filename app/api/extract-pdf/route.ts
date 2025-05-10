@@ -1,38 +1,16 @@
 import { type NextRequest, NextResponse } from "next/server"
-import * as pdfjs from "pdfjs-dist"
+import pdfParse from "pdf-parse"
 import { createWorker } from "tesseract.js"
 
-// Initialize PDF.js worker
-const initPdfWorker = async () => {
-  pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`
-}
-
-// Extract text using PDF.js
-async function extractTextFromPdf(pdfData: ArrayBuffer): Promise<string> {
-  await initPdfWorker()
-  const loadingTask = pdfjs.getDocument({ data: pdfData })
-  const pdf = await loadingTask.promise
-
-  let fullText = ""
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i)
-    const textContent = await page.getTextContent()
-    const pageText = textContent.items.map((item: any) => item.str).join(" ")
-    fullText += pageText + "\n"
-  }
-
-  return fullText
-}
-
 // OCR fallback
-async function extractTextWithOcr(pdfData: ArrayBuffer): Promise<string> {
+async function extractTextWithOcr(pdfData: Buffer): Promise<string> {
   const worker = await createWorker()
-  const { data } = await worker.recognize(new Uint8Array(pdfData))
+  const { data } = await worker.recognize(pdfData)
   await worker.terminate()
   return data.text
 }
 
-// Field parser
+// Extract and parse text
 function parseFields(text: string) {
   const parsedFields: any = {}
 
@@ -57,13 +35,12 @@ function parseFields(text: string) {
     "Agriculture", "Energy", "Legal Services", "Automotive", "Beauty & Wellness",
     "Fitness", "Home Services", "Professional Services",
   ]
-
-  parsedFields.industry = industries.find((ind) => text.toLowerCase().includes(ind.toLowerCase()))
+  parsedFields.industry = industries.find(ind => text.toLowerCase().includes(ind.toLowerCase()))
 
   return parsedFields
 }
 
-// POST handler
+// API handler
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
@@ -73,27 +50,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No file URL provided" }, { status: 400 })
     }
 
-    console.log(`Processing file from ${storageType} storage: ${fileUrl}`)
-
-    let pdfData: ArrayBuffer
-
-    if (storageType === "supabase" || storageType === "public") {
-      const response = await fetch(fileUrl)
-      if (!response.ok) {
-        return NextResponse.json({ error: `Failed to download file: ${response.status}` }, { status: 500 })
-      }
-      pdfData = await response.arrayBuffer()
-    } else {
-      return NextResponse.json({ error: "Unsupported storage type" }, { status: 400 })
+    const response = await fetch(fileUrl)
+    if (!response.ok) {
+      return NextResponse.json({ error: `Failed to download file: ${response.status}` }, { status: 500 })
     }
+
+    const buffer = Buffer.from(await response.arrayBuffer())
 
     let extractedText: string
     try {
-      extractedText = await extractTextFromPdf(pdfData)
-      console.log("Extracted text using PDF.js")
+      const result = await pdfParse(buffer)
+      extractedText = result.text
     } catch (pdfError) {
-      console.warn("PDF.js failed, falling back to OCR")
-      extractedText = await extractTextWithOcr(pdfData)
+      console.warn("PDF parsing failed, using OCR fallback")
+      extractedText = await extractTextWithOcr(buffer)
     }
 
     const parsedFields = parseFields(extractedText)
@@ -106,13 +76,12 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Error processing PDF:", error)
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unknown server error" },
+      { error: error instanceof Error ? error.message : "Unknown error" },
       { status: 500 }
     )
   }
 }
 
-// HEAD handler for health checks
 export async function HEAD() {
   return new Response(null, { status: 200 })
 }
