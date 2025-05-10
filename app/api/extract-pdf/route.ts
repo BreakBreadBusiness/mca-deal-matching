@@ -1,102 +1,52 @@
 import { type NextRequest, NextResponse } from "next/server"
-import * as pdfjs from "pdfjs-dist"
-import { createWorker } from "tesseract.js"
+import pdf from "pdf-parse"
+import { Buffer } from "buffer"
 
-// Initialize PDF.js worker
-const initPdfWorker = async () => {
-  // Set the worker source to a CDN version or use the public path
-  pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.js"
-}
-
-// Function to extract text from PDF
-async function extractTextFromPdf(pdfData: ArrayBuffer): Promise<string> {
-  await initPdfWorker()
-
-  const loadingTask = pdfjs.getDocument({ data: pdfData })
-  const pdf = await loadingTask.promise
-
-  let fullText = ""
-
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i)
-    const textContent = await page.getTextContent()
-    const pageText = textContent.items.map((item: any) => item.str).join(" ")
-    fullText += pageText + "\n"
+// Function to extract text from PDF using Node-compatible library
+async function extractTextFromPdf(pdfData: Buffer): Promise<string> {
+  try {
+    const data = await pdf(pdfData)
+    return data.text || ""
+  } catch (err) {
+    console.error("PDF-parse failed:", err)
+    throw new Error("Failed to extract PDF text")
   }
-
-  return fullText
-}
-
-// Function to extract text using OCR (fallback)
-async function extractTextWithOcr(pdfData: ArrayBuffer): Promise<string> {
-  // Convert PDF to image (simplified - in a real app, you'd use a library to render PDF pages as images)
-  // For this example, we'll assume we already have an image
-  const worker = await createWorker()
-
-  // This is a placeholder - in a real implementation, you'd convert the PDF to an image first
-  const { data } = await worker.recognize(new Uint8Array(pdfData))
-
-  await worker.terminate()
-
-  return data.text
 }
 
 // Function to parse fields from extracted text
 function parseFields(text: string) {
   const parsedFields: any = {}
 
-  // Business Name
   const businessNameMatch = text.match(/business\s*name\s*:?\s*([\w\s&.,'-]+)/i)
-  if (businessNameMatch && businessNameMatch[1]) {
+  if (businessNameMatch?.[1]) {
     parsedFields.businessName = businessNameMatch[1].trim()
   }
 
-  // Credit Score
   const creditScoreMatch = text.match(/credit\s*score\s*:?\s*(\d{3,})/i)
-  if (creditScoreMatch && creditScoreMatch[1]) {
-    parsedFields.creditScore = Number.parseInt(creditScoreMatch[1])
+  if (creditScoreMatch?.[1]) {
+    parsedFields.creditScore = parseInt(creditScoreMatch[1])
   }
 
-  // Time in Business
   const timeInBusinessMatch = text.match(/time\s*in\s*business\s*:?\s*(\d+)/i)
-  if (timeInBusinessMatch && timeInBusinessMatch[1]) {
-    parsedFields.timeInBusiness = Number.parseInt(timeInBusinessMatch[1])
+  if (timeInBusinessMatch?.[1]) {
+    parsedFields.timeInBusiness = parseInt(timeInBusinessMatch[1])
   }
 
-  // Funding Requested
   const fundingMatch = text.match(/funding\s*(?:requested|amount|needed)\s*:?\s*\$?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?)/i)
-  if (fundingMatch && fundingMatch[1]) {
-    parsedFields.fundingRequested = Number.parseInt(fundingMatch[1].replace(/,/g, ""))
+  if (fundingMatch?.[1]) {
+    parsedFields.fundingRequested = parseInt(fundingMatch[1].replace(/,/g, ""))
   }
 
-  // State
   const stateMatch = text.match(/state\s*:?\s*([A-Z]{2})/i)
-  if (stateMatch && stateMatch[1]) {
+  if (stateMatch?.[1]) {
     parsedFields.state = stateMatch[1].toUpperCase()
   }
 
-  // Industry
   const industries = [
-    "Restaurant",
-    "Retail",
-    "Healthcare",
-    "Technology",
-    "Construction",
-    "Manufacturing",
-    "Transportation",
-    "Finance",
-    "Real Estate",
-    "Education",
-    "Hospitality",
-    "Entertainment",
-    "Agriculture",
-    "Energy",
-    "Legal Services",
-    "Automotive",
-    "Beauty & Wellness",
-    "Fitness",
-    "Home Services",
-    "Professional Services",
+    "Restaurant", "Retail", "Healthcare", "Technology", "Construction",
+    "Manufacturing", "Transportation", "Finance", "Real Estate", "Education",
+    "Hospitality", "Entertainment", "Agriculture", "Energy", "Legal Services",
+    "Automotive", "Beauty & Wellness", "Fitness", "Home Services", "Professional Services"
   ]
 
   for (const industry of industries) {
@@ -120,54 +70,18 @@ export async function POST(request: NextRequest) {
 
     console.log(`Processing file from ${storageType} storage:`, fileUrl)
 
-    let pdfData: ArrayBuffer
+    let pdfData: Buffer
 
-    // Handle different storage types
-    if (storageType === "supabase") {
-      // For Supabase storage, download the file
-      const response = await fetch(fileUrl)
-
-      if (!response.ok) {
-        return NextResponse.json(
-          { error: `Failed to download file: ${response.status} ${response.statusText}` },
-          { status: 500 },
-        )
-      }
-
-      pdfData = await response.arrayBuffer()
-    } else if (storageType === "local") {
-      // For local storage, the file should be uploaded directly
-      // In a real implementation, you'd need to handle this differently
-      // This is a simplified example
-      const formData = await request.formData()
-      const file = formData.get("file") as File
-
-      if (!file) {
-        return NextResponse.json({ error: "No file provided in form data" }, { status: 400 })
-      }
-
-      pdfData = await file.arrayBuffer()
-    } else {
-      return NextResponse.json({ error: "Unsupported storage type" }, { status: 400 })
+    const response = await fetch(fileUrl)
+    if (!response.ok) {
+      return NextResponse.json(
+        { error: `Failed to download file: ${response.status} ${response.statusText}` },
+        { status: 500 },
+      )
     }
 
-    // Extract text from PDF
-    let extractedText: string
-    try {
-      extractedText = await extractTextFromPdf(pdfData)
-      console.log("Extracted text using PDF.js")
-    } catch (pdfError) {
-      console.error("PDF.js extraction failed, falling back to OCR:", pdfError)
-      try {
-        extractedText = await extractTextWithOcr(pdfData)
-        console.log("Extracted text using OCR")
-      } catch (ocrError) {
-        console.error("OCR extraction failed:", ocrError)
-        return NextResponse.json({ error: "Failed to extract text from PDF" }, { status: 500 })
-      }
-    }
-
-    // Parse fields from extracted text
+    pdfData = Buffer.from(await response.arrayBuffer())
+    const extractedText = await extractTextFromPdf(pdfData)
     const parsedFields = parseFields(extractedText)
 
     return NextResponse.json({
