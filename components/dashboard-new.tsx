@@ -179,6 +179,29 @@ const getRiskLevel = (score: number) => {
   }
 }
 
+// Add this function to check if the API is available
+const checkApiAvailability = async (url: string): Promise<boolean> => {
+  try {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout
+
+    const response = await fetch("https://mca-backend.onrender.com/upload-and-parse", {
+  method: "POST",
+  body: formData,
+  signal: controller.signal,
+  mode: "cors",
+  credentials: "omit", // or "same-origin" if your backend requires cookies
+});
+
+
+    clearTimeout(timeoutId)
+    return response.ok
+  } catch (error) {
+    console.error("API availability check failed:", error)
+    return false
+  }
+}
+
 export function DashboardNew() {
   // State for the current step
   const [currentStep, setCurrentStep] = useState<string>(STEPS[0].id)
@@ -389,104 +412,311 @@ export function DashboardNew() {
     formData.monthlyRevenue &&
     formData.dataVerified
 
- // Analyze bank statements
-const analyzeBankStatements = async (file: File) => {
-  if (!file) return;
+  // Analyze bank statements
+  const analyzeBankStatements = async (file: File) => {
+    if (!file) return
 
-  try {
-    const fileSizeMB = file.size / (1024 * 1024);
-    if (fileSizeMB > 20) {
-      toast({
-        title: "File Too Large",
-        description: `Your PDF is ${fileSizeMB.toFixed(2)} MB. Maximum allowed size is 20MB.`,
-        variant: "destructive",
-      });
-      throw new Error("File too large");
-    }
+    try {
+      // Check file size
+      const fileSizeMB = file.size / (1024 * 1024)
+      if (fileSizeMB > 20) {
+        toast({
+          title: "File Too Large",
+          description: `Your PDF is ${fileSizeMB.toFixed(2)} MB. Maximum allowed size is 20MB.`,
+          variant: "destructive",
+        })
+        throw new Error("File too large")
+      }
 
-    setDebugInfo("Analyzing bank statement...");
-    console.log("Starting bank statement analysis for file:", file.name);
+      setDebugInfo("Analyzing bank statement...")
+      console.log("Starting bank statement analysis for file:", file.name)
 
-    // Set default values as a fallback
-    setBankAnalysisResults({
-      avgMonthlyRevenue: 30000,
-      nsfDays: 0,
-      existingMcaCount: 0,
-      recentFundingDetected: false,
-      mcaLenders: [],
-      depositConsistency: 85,
-    });
-
-    const formData = new FormData();
-    formData.append("bank_statement", file);
-    formData.append("file_type", "bank_statement");
-
-    const response = await fetch("https://mca-backend.onrender.com/upload-and-parse", {
-      method: "POST",
-      body: formData,
-    });
-
-    const contentType = response.headers.get("content-type");
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Backend returned error:", errorText);
-      throw new Error(`Backend returned ${response.status}`);
-    }
-
-    if (!contentType || !contentType.includes("application/json")) {
-      const rawText = await response.text();
-      console.error("Invalid JSON response:", rawText);
-      throw new Error("Invalid response format from API");
-    }
-
-    const result = await response.json();
-
-    if (!result || !result.analysis) {
-      throw new Error("Missing expected 'analysis' field in response");
-    }
-
-    const analysis = result.analysis;
-
-    setBankAnalysisResults({
-      avgMonthlyRevenue: analysis.avgMonthlyRevenue || 0,
-      avgDailyBalance: analysis.avgDailyBalance || 0,
-      nsfDays: analysis.nsfDays || 0,
-      negativeBalanceDays: analysis.negativeBalanceDays || 0,
-      depositConsistency: analysis.depositConsistency || 0,
-      recentFundingDetected: analysis.recentFundingDetected || false,
-      existingMcaCount: analysis.existingMcaCount || 0,
-    });
-
-    toast({
-      title: "Bank Statement Analyzed",
-      description: "We've extracted financial insights from your document.",
-    });
-
-    return result;
-  } catch (error) {
-    console.error("Fetch error:", error);
-    toast({
-      title: "Failed to Analyze Statement",
-      description: (error as Error).message || "Unexpected error",
-      variant: "destructive",
-    });
-
-    return {
-      filename: file.name,
-      analysis: {
-        avgMonthlyRevenue: 0,
-        avgDailyBalance: 0,
+      // Set default values immediately as a fallback
+      setBankAnalysisResults({
+        avgMonthlyRevenue: 30000, // Default monthly revenue
         nsfDays: 0,
-        negativeBalanceDays: 0,
-        depositConsistency: 0,
-        recentFundingDetected: false,
         existingMcaCount: 0,
-      },
-    };
-  }
-};
+        recentFundingDetected: false,
+        mcaLenders: [],
+        depositConsistency: 85,
+      })
 
+      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+        try {
+          const apiUrl = "https://mca-backend.onrender.com/upload-and-parse"
+          setDebugInfo(`Connecting to API: ${apiUrl}`)
+          console.log("Attempting to connect to:", apiUrl)
+
+          // Create FormData to send the file
+          const formData = new FormData()
+          formData.append("bank_statement", file)
+          formData.append("file_type", "bank_statement")
+
+          // Add timeout to the fetch request
+          const controller = new AbortController()
+          const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+
+          console.log("Sending file to API:", file.name, file.size, "bytes")
+
+          try {
+            // Send to the backend with timeout signal
+            const response = await fetch(apiUrl, {
+              method: "POST",
+              body: formData,
+              signal: controller.signal,
+              // Don't set Content-Type header, let the browser handle it
+            })
+
+            clearTimeout(timeoutId)
+
+            if (!response.ok) {
+              const errorText = await response.text().catch(() => "No error details available")
+              console.error("API error response:", errorText)
+              throw new Error(`API returned status: ${response.status}. Details: ${errorText}`)
+            }
+
+            // Log the raw response for debugging
+            const rawResponse = await response.text()
+            console.log("Raw API response:", rawResponse)
+
+            // Parse the JSON response
+            let result
+            try {
+              result = JSON.parse(rawResponse)
+            } catch (parseError) {
+              console.error("Failed to parse API response:", parseError)
+              throw new Error("Invalid JSON response from API")
+            }
+
+            console.log("Bank statement analysis result:", result)
+
+            if (result && result.bank_analysis) {
+              // If the backend returns analysis results, use them
+              const analysisData = result.bank_analysis
+
+              setBankAnalysisResults({
+                avgMonthlyRevenue: analysisData.avg_monthly_revenue || 30000,
+                nsfDays: analysisData.nsf_days || 0,
+                existingMcaCount: analysisData.existing_mca_count || 0,
+                recentFundingDetected: analysisData.recent_funding_detected || false,
+                mcaLenders: analysisData.mca_lenders || [],
+                depositConsistency: analysisData.deposit_consistency || 85,
+              })
+
+              setDebugInfo("Bank statement analysis complete")
+
+              toast({
+                title: "Bank Statement Analyzed",
+                description: "We've analyzed your bank statement and extracted key financial data.",
+              })
+
+              return true // Signal success
+            } else {
+              throw new Error("Invalid response format from API")
+            }
+          } catch (fetchError) {
+            clearTimeout(timeoutId)
+            console.error("Fetch error:", fetchError)
+
+            if (fetchError.name === "AbortError") {
+              throw new Error("API request timed out after 30 seconds")
+            } else {
+              throw fetchError
+            }
+          }
+        } catch (apiError) {
+          console.error("API error in bank statement analysis:", apiError)
+          setDebugInfo(`API error: ${apiError.message}. Using default values.`)
+
+          // We already set default values at the beginning, so just log the error
+          toast({
+            title: "Using Estimated Values",
+            description: "We couldn't connect to the analysis service. Using estimated values instead.",
+            variant: "warning",
+          })
+
+          return false // Signal failure but with fallback values set
+        }
+      } else {
+        setDebugInfo("Non-PDF file detected. Using default values.")
+        return false
+      }
+    } catch (error) {
+      console.error("Error analyzing bank statement:", error)
+      setDebugInfo(`Error processing bank statement: ${error.message}. Continuing with default values.`)
+
+      // Default values already set at the beginning
+      toast({
+        title: "Analysis Fallback",
+        description: "Using default values for bank statement analysis.",
+        variant: "warning",
+      })
+
+      return false // Signal failure but with fallback values set
+    }
+  }
+
+  // Process application PDF
+  const processApplicationPDF = async () => {
+    if (!application) return false
+
+    try {
+      setIsExtracting(true)
+      setDebugInfo("Extracting information from application...")
+
+      // If we already have extraction success, no need to process again
+      if (extractionSuccess) {
+        setDebugInfo("Using previously extracted information")
+        return false
+      }
+
+      // Try to use the backend API first
+      try {
+        // Create form data for the file upload
+        const formData = new FormData()
+        formData.append("application", application) // Changed field name to "application"
+        formData.append("file_type", "application")
+
+        const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/upload-and-parse`
+        setDebugInfo(`Connecting to API: ${apiUrl}`)
+        console.log("Attempting to connect to API for application processing:", apiUrl)
+
+        // Check API availability first
+        const isApiAvailable = await checkApiAvailability(apiUrl)
+        if (!isApiAvailable) {
+          console.warn("API is not available, skipping application processing")
+          setDebugInfo("API is not available. Proceeding with manual entry.")
+          throw new Error("API is not available")
+        }
+
+        // Send the file to the backend with a timeout
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
+
+        try {
+          const response = await fetch(apiUrl, {
+            method: "POST",
+            body: formData,
+            signal: controller.signal,
+            mode: "cors",
+            credentials: "same-origin",
+          })
+
+          clearTimeout(timeoutId)
+
+          if (response.ok) {
+            const result = await response.json()
+
+            if (result && result.parsed_data) {
+              const extractedData = result.parsed_data
+
+              // Transform the data to match our frontend format
+              const transformedData: ParsedFields = {
+                businessName: extractedData.business_name || "",
+                ownerName: extractedData.owner_name || "",
+                creditScore: extractedData.credit_score || null,
+                timeInBusiness: extractedData.time_in_business || null,
+                fundingRequested: extractedData.funding_requested || null,
+                state: extractedData.state || "",
+                industry: extractedData.industry || "",
+                phoneNumber: extractedData.phone_number || "",
+                email: extractedData.email || "",
+                monthlyRevenue: extractedData.monthly_revenue || null,
+              }
+
+              // Set the parsed data
+              setParsedData(transformedData)
+
+              // Process matched lenders if available
+              if (result.matched_lenders && Array.isArray(result.matched_lenders)) {
+                const lenders: MatchedLender[] = result.matched_lenders.map((lender: any) => ({
+                  id: lender.id || `lender-${Math.random().toString(36).substr(2, 9)}`,
+                  name: lender.name || "Unknown Lender",
+                  description: lender.description || "No description available",
+                  matchScore: lender.match_score || Math.floor(Math.random() * 30) + 70,
+                  minFunding: lender.min_funding || 10000,
+                  maxFunding: lender.max_funding || 500000,
+                  factorRate: lender.factor_rate || 1.2,
+                  termLength: lender.term_length || 12,
+                  requirements: lender.requirements || [],
+                  contactEmail: lender.contact_email,
+                  contactPhone: lender.contact_phone,
+                  logoUrl: lender.logo_url,
+                }))
+
+                setMatchedLenders(lenders)
+              }
+
+              setExtractionSuccess(true)
+              toast({
+                title: "Information Extracted",
+                description:
+                  "We've pre-filled some fields based on your application document. Please verify all fields and complete any missing information before proceeding.",
+              })
+
+              return false // No error occurred
+            } else {
+              throw new Error("Invalid response format from API")
+            }
+          } else {
+            const errorText = await response.text().catch(() => "No error details available")
+            console.error("API error response for application:", errorText)
+            throw new Error(`API returned status: ${response.status} ${response.statusText}. Details: ${errorText}`)
+          }
+        } catch (abortError) {
+          clearTimeout(timeoutId)
+          if (abortError.name === "AbortError") {
+            console.error("API request timed out for application processing")
+            throw new Error("API request timed out after 30 seconds")
+          } else {
+            console.error("Fetch error for application processing:", abortError)
+            throw abortError
+          }
+        }
+      } catch (apiError) {
+        console.error("Error using backend API for application:", apiError)
+        setDebugInfo(`Backend API failed: ${apiError.message}. Proceeding with manual entry...`)
+
+        // Try to extract basic info from the filename as a last resort
+        const filename = application.name
+        if (filename) {
+          // Try to extract business name from filename (very basic fallback)
+          const possibleBusinessName = filename
+            .replace(/\.pdf$/i, "")
+            .replace(/_/g, " ")
+            .replace(/-/g, " ")
+            .trim()
+
+          if (possibleBusinessName) {
+            setFormData((prev) => ({
+              ...prev,
+              businessName: prev.businessName || possibleBusinessName,
+            }))
+
+            setDebugInfo("Extracted basic information from filename as fallback")
+          }
+        }
+
+        throw apiError
+      }
+    } catch (error) {
+      console.error("Error extracting information:", error)
+      setDebugInfo(`Extraction failed: ${error.message}. Please enter information manually.`)
+
+      toast({
+        title: "Extraction Failed",
+        description: "We had trouble processing your document. Please fill in the fields manually.",
+        variant: "warning",
+      })
+
+      // Continue to the next step despite the error
+      return true // Signal that we should continue despite the error
+    } finally {
+      setIsExtracting(false)
+    }
+
+    return false // No error occurred
+  }
 
   // Go to next step
   const goToNextStep = async () => {
@@ -502,8 +732,20 @@ const analyzeBankStatements = async (file: File) => {
         try {
           console.log("Attempting to analyze bank statements...")
           if (bankStatements.length > 0) {
-            await analyzeBankStatements(bankStatements[0])
-            console.log("Bank statement analysis completed successfully")
+            // Try to analyze the first bank statement
+            const analysisSuccess = await analyzeBankStatements(bankStatements[0])
+
+            if (analysisSuccess) {
+              console.log("Bank statement analysis completed successfully")
+            } else {
+              console.log("Bank statement analysis completed with fallback values")
+            }
+
+            // If there are multiple statements, log that we're only analyzing the first one
+            if (bankStatements.length > 1) {
+              console.log(`Note: Only analyzing the first of ${bankStatements.length} bank statements`)
+              setDebugInfo(`Analyzed first statement of ${bankStatements.length}. Using default values for others.`)
+            }
           } else {
             throw new Error("No bank statements available")
           }
@@ -584,6 +826,16 @@ const analyzeBankStatements = async (file: File) => {
     setDebugInfo("Submitting all bank statements to backend...")
 
     try {
+      // Check API availability first
+      const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/upload-batch`
+      const isApiAvailable = await checkApiAvailability(apiUrl)
+
+      if (!isApiAvailable) {
+        console.warn("API is not available, skipping bank statement submission")
+        setDebugInfo("API is not available. Continuing without bank statement submission.")
+        return null
+      }
+
       // Create a FormData object to hold all bank statements
       const formData = new FormData()
 
@@ -603,15 +855,12 @@ const analyzeBankStatements = async (file: File) => {
       while (retries > 0 && !success) {
         try {
           // Send to the backend
-          const response = await fetch(
-            `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/upload-batch`,
-            {
-              method: "POST",
-              body: formData,
-              // Add timeout
-              signal: AbortSignal.timeout(30000),
-            },
-          )
+          const response = await fetch(apiUrl, {
+            method: "POST",
+            body: formData,
+            // Add timeout
+            signal: AbortSignal.timeout(30000),
+          })
 
           if (!response.ok) {
             throw new Error(`API returned status: ${response.status}`)
@@ -730,6 +979,14 @@ const analyzeBankStatements = async (file: File) => {
       // Make the API call to match lenders
       const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/match-lenders`
       console.log("Sending data to lender matching API:", apiUrl, businessData)
+
+      // Check API availability first
+      const isApiAvailable = await checkApiAvailability(apiUrl)
+      if (!isApiAvailable) {
+        console.warn("API is not available, using fallback matching")
+        setDebugInfo("API is not available. Using fallback matching.")
+        throw new Error("API is not available")
+      }
 
       // Create a controller to abort the request if it takes too long
       const controller = new AbortController()
@@ -993,10 +1250,6 @@ Last step: ${debugInfo}`)
           <p className="mt-1 text-sm text-gray-500">Upload your bank statements and application form</p>
         </div>
 
-        <div className="bg-blue-50 text-blue-700 text-sm rounded-md p-3 mb-4">
-          Files will be uploaded to the backend API for processing. All data is securely transmitted and analyzed.
-        </div>
-
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <Card>
             <CardHeader>
@@ -1163,19 +1416,6 @@ Last step: ${debugInfo}`)
               )}
             </CardContent>
           </Card>
-        </div>
-
-        <div className="bg-amber-50 border border-amber-200 p-4 rounded-md text-amber-800 mb-4">
-          <div className="flex items-start">
-            <AlertTriangle className="h-5 w-5 mr-2 mt-0.5" />
-            <div>
-              <p className="font-medium">Important</p>
-              <p className="text-sm">
-                Document analysis will begin when you click "Continue to Information". Make sure you've uploaded both
-                bank statements and your application before proceeding.
-              </p>
-            </div>
-          </div>
         </div>
 
         <div className="flex justify-end">
