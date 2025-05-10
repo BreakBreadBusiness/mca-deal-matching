@@ -179,29 +179,6 @@ const getRiskLevel = (score: number) => {
   }
 }
 
-// Add this function to check if the API is available
-const checkApiAvailability = async (url: string): Promise<boolean> => {
-  try {
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout
-
-    const response = await fetch("https://mca-backend.onrender.com/upload-and-parse", {
-  method: "POST",
-  body: formData,
-  signal: controller.signal,
-  mode: "cors",
-  credentials: "omit", // or "same-origin" if your backend requires cookies
-});
-
-
-    clearTimeout(timeoutId)
-    return response.ok
-  } catch (error) {
-    console.error("API availability check failed:", error)
-    return false
-  }
-}
-
 export function DashboardNew() {
   // State for the current step
   const [currentStep, setCurrentStep] = useState<string>(STEPS[0].id)
@@ -441,9 +418,9 @@ export function DashboardNew() {
         depositConsistency: 85,
       })
 
-      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+      if (file.type === "application/pdf") {
         try {
-          const apiUrl = "https://mca-backend.onrender.com/upload-and-parse"
+          const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/upload-and-parse`
           setDebugInfo(`Connecting to API: ${apiUrl}`)
           console.log("Attempting to connect to:", apiUrl)
 
@@ -456,73 +433,79 @@ export function DashboardNew() {
           const controller = new AbortController()
           const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
 
-          console.log("Sending file to API:", file.name, file.size, "bytes")
+          // Try to fetch with retries
+          let retries = 3
+          let success = false
+          let lastError = null
 
-          try {
-            // Send to the backend with timeout signal
-            const response = await fetch(apiUrl, {
-              method: "POST",
-              body: formData,
-              signal: controller.signal,
-              // Don't set Content-Type header, let the browser handle it
-            })
-
-            clearTimeout(timeoutId)
-
-            if (!response.ok) {
-              const errorText = await response.text().catch(() => "No error details available")
-              console.error("API error response:", errorText)
-              throw new Error(`API returned status: ${response.status}. Details: ${errorText}`)
-            }
-
-            // Log the raw response for debugging
-            const rawResponse = await response.text()
-            console.log("Raw API response:", rawResponse)
-
-            // Parse the JSON response
-            let result
+          while (retries > 0 && !success) {
             try {
-              result = JSON.parse(rawResponse)
-            } catch (parseError) {
-              console.error("Failed to parse API response:", parseError)
-              throw new Error("Invalid JSON response from API")
-            }
-
-            console.log("Bank statement analysis result:", result)
-
-            if (result && result.bank_analysis) {
-              // If the backend returns analysis results, use them
-              const analysisData = result.bank_analysis
-
-              setBankAnalysisResults({
-                avgMonthlyRevenue: analysisData.avg_monthly_revenue || 30000,
-                nsfDays: analysisData.nsf_days || 0,
-                existingMcaCount: analysisData.existing_mca_count || 0,
-                recentFundingDetected: analysisData.recent_funding_detected || false,
-                mcaLenders: analysisData.mca_lenders || [],
-                depositConsistency: analysisData.deposit_consistency || 85,
+              // Send to the backend with timeout signal
+              const response = await fetch(apiUrl, {
+                method: "POST",
+                body: formData,
+                signal: controller.signal,
+                // Add explicit CORS mode
+                mode: "cors",
+                credentials: "same-origin",
+                headers: {
+                  // Remove any content-type header to let the browser set it with the boundary
+                  // This is important for multipart/form-data
+                },
               })
 
-              setDebugInfo("Bank statement analysis complete")
+              clearTimeout(timeoutId)
 
-              toast({
-                title: "Bank Statement Analyzed",
-                description: "We've analyzed your bank statement and extracted key financial data.",
-              })
+              if (!response.ok) {
+                const errorText = await response.text().catch(() => "No error details available")
+                console.error("API error response:", errorText)
+                throw new Error(`API returned status: ${response.status}. Details: ${errorText}`)
+              }
 
-              return true // Signal success
-            } else {
-              throw new Error("Invalid response format from API")
+              const result = await response.json()
+              console.log("Bank statement analysis result:", result)
+
+              if (result && result.bank_analysis) {
+                // If the backend returns analysis results, use them
+                const analysisData = result.bank_analysis
+
+                setBankAnalysisResults({
+                  avgMonthlyRevenue: analysisData.avg_monthly_revenue || 30000,
+                  nsfDays: analysisData.nsf_days || 0,
+                  existingMcaCount: analysisData.existing_mca_count || 0,
+                  recentFundingDetected: analysisData.recent_funding_detected || false,
+                  mcaLenders: analysisData.mca_lenders || [],
+                  depositConsistency: analysisData.deposit_consistency || 85,
+                })
+
+                setDebugInfo("Bank statement analysis complete")
+
+                toast({
+                  title: "Bank Statement Analyzed",
+                  description: "We've analyzed your bank statement and extracted key financial data.",
+                })
+
+                success = true
+                break
+              } else {
+                throw new Error("Invalid response format from API")
+              }
+            } catch (fetchError) {
+              clearTimeout(timeoutId)
+              lastError = fetchError
+              console.error(`Fetch attempt ${4 - retries} failed:`, fetchError)
+              retries--
+
+              if (retries > 0) {
+                // Wait before retrying (exponential backoff)
+                await new Promise((resolve) => setTimeout(resolve, 1000 * (4 - retries)))
+                setDebugInfo(`Retrying API connection (${retries} attempts left)...`)
+              }
             }
-          } catch (fetchError) {
-            clearTimeout(timeoutId)
-            console.error("Fetch error:", fetchError)
+          }
 
-            if (fetchError.name === "AbortError") {
-              throw new Error("API request timed out after 30 seconds")
-            } else {
-              throw fetchError
-            }
+          if (!success) {
+            throw lastError || new Error("All API connection attempts failed")
           }
         } catch (apiError) {
           console.error("API error in bank statement analysis:", apiError)
@@ -534,12 +517,9 @@ export function DashboardNew() {
             description: "We couldn't connect to the analysis service. Using estimated values instead.",
             variant: "warning",
           })
-
-          return false // Signal failure but with fallback values set
         }
       } else {
         setDebugInfo("Non-PDF file detected. Using default values.")
-        return false
       }
     } catch (error) {
       console.error("Error analyzing bank statement:", error)
@@ -551,8 +531,6 @@ export function DashboardNew() {
         description: "Using default values for bank statement analysis.",
         variant: "warning",
       })
-
-      return false // Signal failure but with fallback values set
     }
   }
 
@@ -580,14 +558,6 @@ export function DashboardNew() {
         const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/upload-and-parse`
         setDebugInfo(`Connecting to API: ${apiUrl}`)
         console.log("Attempting to connect to API for application processing:", apiUrl)
-
-        // Check API availability first
-        const isApiAvailable = await checkApiAvailability(apiUrl)
-        if (!isApiAvailable) {
-          console.warn("API is not available, skipping application processing")
-          setDebugInfo("API is not available. Proceeding with manual entry.")
-          throw new Error("API is not available")
-        }
 
         // Send the file to the backend with a timeout
         const controller = new AbortController()
@@ -732,20 +702,8 @@ export function DashboardNew() {
         try {
           console.log("Attempting to analyze bank statements...")
           if (bankStatements.length > 0) {
-            // Try to analyze the first bank statement
-            const analysisSuccess = await analyzeBankStatements(bankStatements[0])
-
-            if (analysisSuccess) {
-              console.log("Bank statement analysis completed successfully")
-            } else {
-              console.log("Bank statement analysis completed with fallback values")
-            }
-
-            // If there are multiple statements, log that we're only analyzing the first one
-            if (bankStatements.length > 1) {
-              console.log(`Note: Only analyzing the first of ${bankStatements.length} bank statements`)
-              setDebugInfo(`Analyzed first statement of ${bankStatements.length}. Using default values for others.`)
-            }
+            await analyzeBankStatements(bankStatements[0])
+            console.log("Bank statement analysis completed successfully")
           } else {
             throw new Error("No bank statements available")
           }
@@ -826,16 +784,6 @@ export function DashboardNew() {
     setDebugInfo("Submitting all bank statements to backend...")
 
     try {
-      // Check API availability first
-      const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/upload-batch`
-      const isApiAvailable = await checkApiAvailability(apiUrl)
-
-      if (!isApiAvailable) {
-        console.warn("API is not available, skipping bank statement submission")
-        setDebugInfo("API is not available. Continuing without bank statement submission.")
-        return null
-      }
-
       // Create a FormData object to hold all bank statements
       const formData = new FormData()
 
@@ -855,12 +803,15 @@ export function DashboardNew() {
       while (retries > 0 && !success) {
         try {
           // Send to the backend
-          const response = await fetch(apiUrl, {
-            method: "POST",
-            body: formData,
-            // Add timeout
-            signal: AbortSignal.timeout(30000),
-          })
+          const response = await fetch(
+            `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/upload-batch`,
+            {
+              method: "POST",
+              body: formData,
+              // Add timeout
+              signal: AbortSignal.timeout(30000),
+            },
+          )
 
           if (!response.ok) {
             throw new Error(`API returned status: ${response.status}`)
@@ -979,14 +930,6 @@ export function DashboardNew() {
       // Make the API call to match lenders
       const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || "https://mca-backend.onrender.com"}/match-lenders`
       console.log("Sending data to lender matching API:", apiUrl, businessData)
-
-      // Check API availability first
-      const isApiAvailable = await checkApiAvailability(apiUrl)
-      if (!isApiAvailable) {
-        console.warn("API is not available, using fallback matching")
-        setDebugInfo("API is not available. Using fallback matching.")
-        throw new Error("API is not available")
-      }
 
       // Create a controller to abort the request if it takes too long
       const controller = new AbortController()
@@ -1250,6 +1193,10 @@ Last step: ${debugInfo}`)
           <p className="mt-1 text-sm text-gray-500">Upload your bank statements and application form</p>
         </div>
 
+        <div className="bg-blue-50 text-blue-700 text-sm rounded-md p-3 mb-4">
+          Files will be uploaded to the backend API for processing. All data is securely transmitted and analyzed.
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <Card>
             <CardHeader>
@@ -1416,6 +1363,19 @@ Last step: ${debugInfo}`)
               )}
             </CardContent>
           </Card>
+        </div>
+
+        <div className="bg-amber-50 border border-amber-200 p-4 rounded-md text-amber-800 mb-4">
+          <div className="flex items-start">
+            <AlertTriangle className="h-5 w-5 mr-2 mt-0.5" />
+            <div>
+              <p className="font-medium">Important</p>
+              <p className="text-sm">
+                Document analysis will begin when you click "Continue to Information". Make sure you've uploaded both
+                bank statements and your application before proceeding.
+              </p>
+            </div>
+          </div>
         </div>
 
         <div className="flex justify-end">
