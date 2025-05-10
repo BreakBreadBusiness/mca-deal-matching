@@ -61,6 +61,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return false
       }
 
+      // Set a basic user object immediately to prevent loading state
+      setUser({
+        id: sessionUser.id,
+        email: sessionUser.email || "",
+        isAdmin: false,
+        status: "pending", // Default to pending until we check
+      })
+
       // Add delay to avoid rate limiting
       const addDelay = async () => {
         await new Promise((resolve) => setTimeout(resolve, 500))
@@ -69,17 +77,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Check approval status first with retry logic
       let status = null
       let retryCount = 0
-      const maxRetries = 3
+      const maxRetries = 2 // Reduce retries to prevent long loading times
 
       while (status === null && retryCount < maxRetries) {
         if (retryCount > 0) {
           // Add exponential backoff
-          const delay = Math.pow(2, retryCount) * 1000
+          const delay = Math.pow(2, retryCount) * 500 // Shorter delays
           console.log(`Retrying status check in ${delay}ms (attempt ${retryCount + 1}/${maxRetries})`)
           await new Promise((resolve) => setTimeout(resolve, delay))
         }
 
-        status = await checkUserApprovalStatus(sessionUser.id)
+        try {
+          status = await checkUserApprovalStatus(sessionUser.id)
+        } catch (err) {
+          console.error("Error in status check attempt:", err)
+        }
         retryCount++
       }
 
@@ -101,16 +113,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return false // Not approved
         } catch (regError) {
           console.error("Error registering user for approval:", regError)
-          setUser(null)
-          setAuthError("Failed to register for approval. Please try again.")
+          // Don't fail completely, just set a basic user
+          setUser({
+            id: sessionUser.id,
+            email: sessionUser.email || "",
+            isAdmin: false,
+            status: "pending",
+          })
           return false
         }
       } else {
         // Only check admin status if the user is approved
         let isAdmin = false
         if (status === "approved") {
-          await addDelay() // Add delay before admin check
-          isAdmin = await isCurrentUserAdmin()
+          try {
+            await addDelay() // Add delay before admin check
+            isAdmin = await isCurrentUserAdmin()
+          } catch (err) {
+            console.error("Error checking admin status:", err)
+            // Continue with non-admin status on error
+          }
         }
 
         // User exists in user_management table
@@ -125,8 +147,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     } catch (error) {
       console.error("Error checking user status:", error)
-      setUser(null)
-      setAuthError("Error checking user status. Please try again.")
+      // Set a basic user on error to prevent getting stuck
+      if (sessionUser) {
+        setUser({
+          id: sessionUser.id,
+          email: sessionUser.email || "",
+          isAdmin: false,
+          status: "pending",
+        })
+      } else {
+        setUser(null)
+      }
       return false
     }
   }
@@ -151,8 +182,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         setIsLoading(true)
 
+        // Add a timeout to prevent infinite loading
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Authentication initialization timed out")), 10000),
+        )
+
         // Get session with a lightweight call
-        const { data } = await supabase.auth.getSession()
+        const sessionPromise = supabase.auth.getSession()
+
+        // Race the session call with a timeout
+        const { data } = (await Promise.race([sessionPromise, timeoutPromise])) as { data: any }
 
         if (isMounted) {
           if (data.session) {
@@ -171,7 +210,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         console.error("Error initializing auth:", error)
         if (isMounted) {
-          setAuthError("Failed to initialize authentication.")
+          setAuthError("Failed to initialize authentication. Please refresh the page.")
+          setIsLoading(false)
+          setAuthInitialized(true) // Mark as initialized even on error to prevent getting stuck
         }
       } finally {
         if (isMounted) {
