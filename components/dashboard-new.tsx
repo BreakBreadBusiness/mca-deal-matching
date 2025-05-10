@@ -1193,10 +1193,6 @@ Last step: ${debugInfo}`)
           <p className="mt-1 text-sm text-gray-500">Upload your bank statements and application form</p>
         </div>
 
-        <div className="bg-blue-50 text-blue-700 text-sm rounded-md p-3 mb-4">
-          Files will be uploaded to the backend API for processing. All data is securely transmitted and analyzed.
-        </div>
-
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <Card>
             <CardHeader>
@@ -1363,19 +1359,6 @@ Last step: ${debugInfo}`)
               )}
             </CardContent>
           </Card>
-        </div>
-
-        <div className="bg-amber-50 border border-amber-200 p-4 rounded-md text-amber-800 mb-4">
-          <div className="flex items-start">
-            <AlertTriangle className="h-5 w-5 mr-2 mt-0.5" />
-            <div>
-              <p className="font-medium">Important</p>
-              <p className="text-sm">
-                Document analysis will begin when you click "Continue to Information". Make sure you've uploaded both
-                bank statements and your application before proceeding.
-              </p>
-            </div>
-          </div>
         </div>
 
         <div className="flex justify-end">
